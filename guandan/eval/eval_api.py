@@ -41,6 +41,14 @@ class JobCancelled(Exception):
 
 
 def _new_job() -> str:
+    # Single-active-job policy: CPU-bound games share the GIL, so piling up
+    # concurrent jobs starves every one of them (the "stuck" symptom).
+    # Starting a new job cancels all still-running ones.
+    for jid, j in _jobs.items():
+        if j["status"] in ("running", "cancelling"):
+            j["cancel"] = True
+            j["status"] = "cancelling"
+            j["message"] = "被新任务取代，正在停止…"
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running", "progress": 0.0, "message": "",
                   "cancel": False, "result": None, "error": None,

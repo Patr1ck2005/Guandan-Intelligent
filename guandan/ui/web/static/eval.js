@@ -293,11 +293,12 @@ function renderJobProgress(d) {
   const p = Math.max(0, Math.min(1, d.progress || 0));
   const pct = Math.round(p * 100);
   const msg = d.message || '运行中…';
+  const elapsed = E.jobStart ? fmtDuration((Date.now() - E.jobStart) / 1000) : '';
   const eta = E.jobStart ? computeEta(p) : '';
   return `<div class="job-running">
     <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
     <div class="job-msg">${escapeHtml(msg)}</div>
-    ${eta ? `<div class="job-eta">预计剩余 ${eta}</div>` : ''}
+    <div class="job-eta">已运行 ${elapsed}${eta ? ' · 预计剩余 ' + eta : ''}</div>
   </div>`;
 }
 

@@ -141,7 +141,12 @@ class TestProgressCallbacks:
             calls.append((done, total))
 
         run_match({"id": "blind"}, {"id": "blind"}, n_games=2, base_seed=0, progress_cb=cb)
-        assert calls == [(1, 2), (2, 2)]
+        # Move-based progress: many callbacks, monotonic 'done', final one complete
+        assert len(calls) >= 2
+        dones = [d for d, _ in calls]
+        assert dones == sorted(dones)
+        assert all(total == dones[-1] for _, total in calls)
+        assert calls[-1][0] == calls[-1][1]  # final callback reports completion
 
     def test_benchmark_progress(self):
         from guandan.eval.eval_api import run_scenario_benchmark

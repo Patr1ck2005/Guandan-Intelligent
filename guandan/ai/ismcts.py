@@ -244,6 +244,10 @@ class ISMCTSDecider:
             current = next_active_player(sim_state, sim_state.current_player)
             hand = sim_state.hands[current]
 
+            # Hard-stop before a (possibly slow) inner-agent call if budget is gone
+            if deadline is not None and time.time() > deadline:
+                return did_team_win(sim_state, my_team)
+
             # Use inner decider
             sim_view = PlayerView(sim_state, current)
             if self.inner:

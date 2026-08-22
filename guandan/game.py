@@ -34,11 +34,13 @@ class Game:
     MAX_TRICKS_PER_ROUND = 500
     MAX_TRICK_ITERATIONS = 200
 
-    def __init__(self, agents: List, level: int = 2, agent_timeout_ms: float = 75000):
+    def __init__(self, agents: List, level: int = 2, agent_timeout_ms: float = 75000,
+                 on_move=None):
         if len(agents) != 4:
             raise ValueError(f"Need exactly 4 agents, got {len(agents)}")
         self.agents = agents
         self.agent_timeout_ms = agent_timeout_ms
+        self.on_move = on_move  # optional callback after each play/pass (for progress)
         self.rules = RulesEngine(level)
         self.state: Optional[GameState] = None
         self.team_levels = [level, level]  # [team_0, team_1]
@@ -224,6 +226,9 @@ class Game:
                 self.state.table.record_pass(current)
                 game_logger.game_debug("pass", player=current,
                                        trick=self.state.trick_number)
+
+            if self.on_move:
+                self.on_move(self)
 
             # Next player (clockwise, skip finished)
             current = (current + 1) % 4

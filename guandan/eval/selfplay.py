@@ -10,6 +10,7 @@ the whole match.
 from __future__ import annotations
 
 import random
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -100,6 +101,32 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
     RNG, so individual games are still valid but not seed-reproducible.
     """
     t0 = time.time()
+    _lock = threading.Lock()
+    # Progress model: fraction = (completed games + window) / n_games, where the
+    # window grows with the current game's move count (capped at 0.95 so one
+    # game never fills the bar). Move counts are estimates; game-completion
+    # callbacks are authoritative, so the bar advances smoothly inside a long
+    # game and lands exactly on each game boundary. Strictly monotonic.
+    _st = {"completed": 0, "window": 0.0}
+    _cnt = {"n": 0}
+    MOVES_PER_GAME_ESTIMATE = 250  # a long blind game can exceed 150 moves
+
+    def _emit(message: str):
+        if not progress_cb:
+            return
+        with _lock:
+            frac = min((_st["completed"] + min(_st["window"], 0.95)) / n_games, 1.0)
+        progress_cb(int(frac * 100), 100, message)
+
+    def on_move(_game):
+        """Called by Game after every play/pass so the bar moves continuously."""
+        _cnt["n"] += 1
+        with _lock:
+            _st["window"] = min(_cnt["n"] / MOVES_PER_GAME_ESTIMATE, 0.95)
+        if _cnt["n"] % 5 == 0:
+            with _lock:
+                done = _st["completed"]
+            _emit(f"第 {_cnt['n']} 步 · 局 {done + 1}/{n_games}")
 
     def play_one(i: int) -> GameRecord:
         seed = base_seed + i
@@ -110,7 +137,8 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             build_player_agent(profile_a),  # seat 2 (team 0)
             build_player_agent(profile_b),  # seat 3 (team 1)
         ]
-        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms)
+        _cnt["n"] = 0
+        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms, on_move=on_move)
         try:
             result = game.play_game()
         except Exception as e:
@@ -123,10 +151,11 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
     if max_workers <= 1:
         for i in range(n_games):
             games.append(play_one(i))
-            if progress_cb:
-                aw = sum(1 for g in games if g.winning_team == 0)
-                progress_cb(i + 1, n_games,
-                            f"第 {i + 1}/{n_games} 局 · 种子 {base_seed + i} · A {aw} : B {i + 1 - aw}")
+            with _lock:
+                _st["completed"] = i + 1
+                _st["window"] = 0.0
+            aw = sum(1 for g in games if g.winning_team == 0)
+            _emit(f"第 {i + 1}/{n_games} 局完成 · A {aw} : B {i + 1 - aw}")
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(play_one, i) for i in range(n_games)]
@@ -134,10 +163,11 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             for fut in as_completed(futures):
                 games.append(fut.result())
                 completed += 1
-                if progress_cb:
-                    aw = sum(1 for g in games if g.winning_team == 0)
-                    progress_cb(completed, n_games,
-                                f"已完成 {completed}/{n_games} 局 · A {aw} : B {completed - aw}")
+                with _lock:
+                    _st["completed"] = max(_st["completed"], completed)
+                    _st["window"] = 0.0
+                aw = sum(1 for g in games if g.winning_team == 0)
+                _emit(f"已完成 {completed}/{n_games} 局 · A {aw} : B {completed - aw}")
 
     games.sort(key=lambda g: g.seed)
     a_wins = sum(1 for g in games if g.winning_team == 0)
