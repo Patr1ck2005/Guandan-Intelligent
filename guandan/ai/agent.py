@@ -428,6 +428,8 @@ class BlindAgent(BaseAgent):
             return []
         if best is not None:
             return list(best.cards)
+        if can_pass:
+            return []  # no legal response — must pass, not play an illegal single
         if hand:
             return [hand[0]]
         return []

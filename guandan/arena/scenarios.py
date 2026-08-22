@@ -59,6 +59,11 @@ class Scenario:
     expected_play: Optional[List[int]] = None
     expected_pass: bool = False
     reasoning: str = ""
+    # Eval metadata (set by the eval module; curated scenarios default to these)
+    source: str = "curated"       # curated | synthetic | consensus
+    ground_truth: str = "manual"  # manual | exact | consensus
+    difficulty: str = ""          # easy | medium | hard (set by grading)
+    tags: List[str] = field(default_factory=list)
 
 
 # ==================================================================

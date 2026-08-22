@@ -84,9 +84,10 @@ class MCDecider:
 
         results = []  # list of (combo, wr, sims, wins)
         timed_out = False
+        deadline = t_start + self.time_limit_ms / 1000  # HARD cap on the decision
 
         for candidate in all_candidates:
-            if time.time() - t_start > self.time_limit_ms / 1000:
+            if time.time() > deadline:
                 timed_out = True
                 break
 
@@ -97,10 +98,10 @@ class MCDecider:
             wins = 0
             sims = 0
             for _ in range(self.num_samples):
-                if time.time() - t_start > self.time_limit_ms / 1000:
+                if time.time() > deadline:
                     timed_out = True
                     break
-                if self._run_one_simulation(view, candidate):
+                if self._run_one_simulation(view, candidate, deadline):
                     wins += 1
                 sims += 1
 
@@ -149,8 +150,14 @@ class MCDecider:
             metrics={"elapsed_ms": elapsed, "timed_out": timed_out},
             model_name="MCDecider")
 
-    def _run_one_simulation(self, view: PlayerView, my_play: Combo) -> bool:
-        """Run one simulation. Returns True if my team wins."""
+    def _run_one_simulation(self, view: PlayerView, my_play: Combo,
+                            deadline: float | None = None) -> bool:
+        """Run one simulation. Returns True if my team wins.
+
+        ``deadline`` is a monotonic wall-clock cap (from the decision start);
+        if exceeded mid-simulation the sim stops early and reports the current
+        state, so ``time_limit_ms`` is a HARD bound on each MC decision.
+        """
         pid = view.player_id
         my_team = {0: 0, 1: 1, 2: 0, 3: 1}[pid]
 
@@ -174,6 +181,8 @@ class MCDecider:
 
         # Simulate to end
         for _ in range(200):
+            if deadline is not None and time.time() > deadline:
+                return did_team_win(sim_state, my_team)  # hard stop; report partial state
             if len(sim_state.finished_positions) >= 3:
                 return did_team_win(sim_state, my_team)
 

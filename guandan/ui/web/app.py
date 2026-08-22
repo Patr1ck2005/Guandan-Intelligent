@@ -23,6 +23,7 @@ from flask import Flask, jsonify, render_template, request, session
 
 from ..interactive import InteractiveGame
 from .arena_api import arena_bp
+from ...eval.eval_api import eval_bp
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent.parent.parent / "config.json"
 
@@ -30,6 +31,7 @@ app = Flask(__name__)
 app.jinja_env.auto_reload = True
 app.secret_key = os.environ.get("GUANDAN_SECRET", os.urandom(24))
 app.register_blueprint(arena_bp)
+app.register_blueprint(eval_bp)
 
 _games: dict = {}  # {sid: (InteractiveGame, last_access_timestamp)}
 _GAME_TTL = 30 * 60  # 30 minutes
@@ -105,6 +107,17 @@ def game_page():
 @app.route("/arena")
 def arena_page():
     return render_template("arena.html")
+
+
+@app.route("/eval")
+def eval_page():
+    return render_template("eval.html")
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Silence the browser's automatic /favicon.ico 404."""
+    return ("", 204)
 
 
 # ==================================================================

@@ -103,10 +103,11 @@ class ISMCTSDecider:
             pass_state.current_player = (pid + 1) % 4
             root.add_child(None, pass_state)  # None = pass
 
-        # Main MCTS loop
+        # Main MCTS loop — deadline is a HARD cap including per-iteration sims
+        deadline = t_start + self.time_limit_ms / 1000
         iterations = 0
         while iterations < self.max_iterations:
-            if time.time() - t_start > self.time_limit_ms / 1000:
+            if time.time() > deadline:
                 break
 
             # Select
@@ -117,7 +118,7 @@ class ISMCTSDecider:
                 node = self._expand(node, view)
 
             # Simulate
-            result = self._simulate(node, view)
+            result = self._simulate(node, view, deadline)
 
             # Backpropagate
             self._backpropagate(node, result, pid)
@@ -127,47 +128,54 @@ class ISMCTSDecider:
         elapsed = (time.time() - t_start) * 1000
         timed_out = iterations >= self.max_iterations
 
-        # Build results from root children
+        # Build results from root children — selection by visit count (robust child)
         from .models.interface import AnalyzeResult, CandidateResult
         crs = []
         best_combo = None
         best_visits = -1
+        best_cr = None
 
         for combo, child in root.children:
             wr = child.wins / child.visits if child.visits > 0 else 0.0
             detail = {"visits": child.visits, "wins": child.wins, "ucb_c": self.ucb_c}
             if combo is None:
-                crs.append(CandidateResult(combo_type="PASS", cards=[], card_ids=[],
-                                           win_rate=wr, score=wr,
-                                           reasoning=f"IS-MCTS: {child.wins}/{child.visits}",
-                                           detail=detail))
+                cr = CandidateResult(combo_type="PASS", cards=[], card_ids=[],
+                                     win_rate=wr, score=wr,
+                                     reasoning=f"IS-MCTS: {child.wins}/{child.visits}",
+                                     detail=detail)
             else:
-                crs.append(CandidateResult(
+                cr = CandidateResult(
                     combo_type=combo.combo_type.name,
                     cards=[x.display for x in combo.cards],
                     card_ids=[x.id for x in combo.cards],
                     win_rate=wr, score=wr,
                     reasoning=f"IS-MCTS: {child.wins}/{child.visits} visits",
-                    detail=detail))
+                    detail=detail)
+            crs.append(cr)
             if child.visits > best_visits:
                 best_visits = child.visits
                 best_combo = combo
+                best_cr = cr
 
         crs.sort(key=lambda r: r.win_rate or 0, reverse=True)
+
+        # Robust child (most visited) is the final choice; fall back to crs[0].
+        if best_cr is None and crs:
+            best_cr = crs[0]
 
         ai_log(pid, "decision_end", agent="IS-MCTS",
                candidates_scored=[{"type": c.combo_type, "cards": c.cards,
                                    "win_rate": round(c.win_rate or 0, 3)} for c in crs],
                choice=(best_combo.combo_type.name if best_combo else "PASS"),
                choice_cards=[x.display for x in best_combo.cards] if best_combo else [],
-               choice_win_rate=round(best_visits / iterations if iterations > 0 else 0, 3),
+               choice_win_rate=round(best_cr.win_rate or 0, 3) if best_cr else 0,
                elapsed_ms=round(elapsed, 1),
                timed_out=timed_out, iterations=iterations)
 
         return AnalyzeResult(
             candidates=crs,
-            choice=crs[0] if crs else None,
-            pass_chosen=(best_combo is None),
+            choice=best_cr,
+            pass_chosen=(best_cr is not None and best_cr.combo_type == "PASS"),
             metrics={"elapsed_ms": elapsed, "iterations": iterations, "timed_out": timed_out},
             model_name="IS-MCTS")
 
@@ -198,8 +206,13 @@ class ISMCTSDecider:
         child = node.add_child(combo, child_state)
         return child
 
-    def _simulate(self, node: _Node, view: PlayerView) -> bool:
-        """Rollout from this node to terminal, return True if my team wins."""
+    def _simulate(self, node: _Node, view: PlayerView,
+                  deadline: float | None = None) -> bool:
+        """Rollout from this node to terminal, return True if my team wins.
+
+        ``deadline`` bounds the whole simulation so ``time_limit_ms`` is a
+        HARD cap on the search, not just a check between iterations.
+        """
         pid = view.player_id
         my_team = {0: 0, 1: 1, 2: 0, 3: 1}[pid]
         sim_state = clone_state(node.state)
@@ -214,6 +227,8 @@ class ISMCTSDecider:
 
         # Simulate to end
         for _ in range(200):
+            if deadline is not None and time.time() > deadline:
+                return did_team_win(sim_state, my_team)  # hard stop
             if len(sim_state.finished_positions) >= 3:
                 result = calculate_result(sim_state.finished_positions)
                 return result.winning_team == my_team
@@ -250,14 +265,17 @@ class ISMCTSDecider:
         return did_team_win(sim_state, my_team)
 
     def _backpropagate(self, node: _Node, won: bool, root_pid: int):
-        """Propagate result up the tree."""
-        my_team = {0: 0, 1: 1, 2: 0, 3: 1}[root_pid]
+        """Propagate a single reward (did the ROOT player's team win?) up the tree.
+
+        All nodes on the path share the same outcome from the root player's
+        perspective, so each simply accumulates `won`. The previous per-node
+        team re-mapping credited a child from the NEXT player's perspective,
+        inverting win rates at odd depths and making `choice` pick the move
+        best for the opponent.
+        """
         while node is not None:
             node.visits += 1
-            # Win counts from the perspective of the player who acted at this node
-            current = next_active_player(node.state, node.state.current_player)
-            current_team = {0: 0, 1: 1, 2: 0, 3: 1}[current]
-            if (won and current_team == my_team) or (not won and current_team != my_team):
+            if won:
                 node.wins += 1
             node = node.parent
 

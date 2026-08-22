@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>评估实验室 — 掼蛋</title>
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/eval.css">
+</head>
+<body>
+
+<div id="eval-app">
+  <div id="eval-header">
+    <h1>评估实验室</h1>
+    <a href="/">主菜单</a> <a href="/game">对战</a> <a href="/arena">测试场</a>
+    <div id="eval-tabs">
+      <button class="etab on" data-mode="benchmark" onclick="setMode('benchmark')">场景基准</button>
+      <button class="etab" data-mode="match" onclick="setMode('match')">自对弈</button>
+      <button class="etab" data-mode="roundrobin" onclick="setMode('roundrobin')">循环赛 Elo</button>
+      <button class="etab" data-mode="generate" onclick="setMode('generate')">生成题库</button>
+    </div>
+    <span style="flex:1"></span>
+    <span id="scenario-counts" style="font-size:0.75em;color:#888"></span>
+  </div>
+
+  <div id="eval-body">
+    <div id="eval-side">
+      <div class="sect"><h3>模型</h3><div id="model-picker"></div></div>
+      <div class="sect" id="match-pick" style="display:none">
+        <h3>对战双方</h3>
+        <div id="match-picker"></div>
+      </div>
+      <div class="sect"><h3>参数</h3><div id="param-panel"></div></div>
+      <div class="sect"><h3>运行</h3><div id="run-panel"></div></div>
+    </div>
+    <div id="eval-main"><div id="eval-result" class="emp">选择评估类型并运行</div></div>
+  </div>
+</div>
+
+<script src="/static/eval.js"></script>
+</body>
+</html>

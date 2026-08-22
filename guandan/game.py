@@ -155,14 +155,19 @@ class Game:
 
             if self.agent_timeout_ms > 0:
                 timeout_s = self.agent_timeout_ms / 1000
+                executor = ThreadPoolExecutor(max_workers=1)
                 try:
-                    with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(agent.choose_play, view)
-                        play_cards = future.result(timeout=timeout_s)
+                    future = executor.submit(agent.choose_play, view)
+                    play_cards = future.result(timeout=timeout_s)
                 except FutureTimeoutError:
                     game_logger.warning("agent_timeout", player=current,
                                         timeout_ms=self.agent_timeout_ms)
                     play_cards = self._force_play(current, hand)
+                    # Do NOT block on shutdown: the worker keeps running until the
+                    # agent itself returns, so the timeout truly caps this move.
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
             else:
                 play_cards = agent.choose_play(view)
 
@@ -176,11 +181,16 @@ class Game:
             )
 
             if not result.is_legal:
-                raise IllegalPlayError(
-                    f"Player {current} illegal play: {result.reason}",
-                    player_id=current,
-                    reason=result.reason,
-                )
+                game_logger.warning("illegal_play", player=current,
+                                    reason=getattr(result.reason, 'name', str(result.reason)))
+                # Coerce to a safe legal move rather than aborting the game.
+                play_cards = self._force_play(current, hand)
+                result = self.rules.validate_play(
+                    cards=play_cards, hand=hand, table_state=self.state.table,
+                    player_id=current, finished_positions=self.state.finished_positions)
+                if not result.is_legal:
+                    play_cards = []
+                    result = None
 
             if play_cards:
                 # Play: update table and hand
@@ -231,24 +241,24 @@ class Game:
         if self.state.table.last_played_player >= 0:
             self.state.current_player = self.state.table.last_played_player
 
-    def _force_play(self, _player_id: int, hand: tuple) -> list:
-        """Fallback when agent times out: play smallest single, or pass."""
-        from .combo_parser import ComboParser
+    def _force_play(self, player_id: int, hand: tuple) -> list:
+        """Fallback when an agent times out or plays illegally.
+
+        Leader: play the smallest single. Follower: pass (always legal).
+        """
         from .card import Rank
-        normal = sorted(
-            [c for c in hand if c.rank < Rank.SMALL_JOKER],
-            key=lambda c: c.rank.value,
-        )
-        if normal:
-            parser = ComboParser(self.state.level)
-            combo = parser.parse([normal[0]])
-            if combo:
+        is_leader = self.state.table.is_empty or self.state.table.last_played_player == player_id
+        if is_leader:
+            normal = sorted(
+                [c for c in hand if c.rank < Rank.SMALL_JOKER],
+                key=lambda c: c.rank.value,
+            )
+            if normal:
                 return [normal[0]]
-        if self.state.table.is_empty:
-            # Leader must play — force any single
             for c in hand:
                 return [c]
-        return []  # pass
+            return []
+        return []  # follower passes
 
 
 class IllegalPlayError(Exception):
