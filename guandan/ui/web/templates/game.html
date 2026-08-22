@@ -23,6 +23,7 @@
       <span class="badge team0">我方 Lv<strong id="info-team0">2</strong></span>
       <span class="badge team1">对方 Lv<strong id="info-team1">2</strong></span>
       <button id="btn-debug" onclick="toggleDebug()">隐藏牌面</button>
+      <button id="btn-llm-think" onclick="toggleLLMBubbles()" style="background:#9b59b6;color:#fff">LLM思考</button>
       <button id="btn-ai-debug" onclick="toggleAIDebug()">AI日志</button>
       <button id="btn-config" onclick="toggleConfig()" style="background:#444;color:#fff">AI设置</button>
     </div>
@@ -33,6 +34,7 @@
     <!-- Partner (top) -->
     <div class="player-zone partner" id="zone-2">
       <div class="zone-header">
+        <span class="decider-badge" id="decider-2" title="">?</span>
         <span class="name" id="name-2">对家</span>
         <span class="hand-size" id="size-2">27</span>张
         <span class="finished-tag" id="finish-2" style="display:none">已完成</span>
@@ -40,12 +42,14 @@
       <div class="zone-body">
         <div class="play-display" id="play-2"></div>
         <div class="debug-cards-inline" id="debug-hand-2" style="display:none"></div>
+        <div class="llm-bubble partner" id="llm-bubble-2" style="display:none"></div>
       </div>
     </div>
 
     <!-- Left player -->
     <div class="player-zone left" id="zone-3">
       <div class="zone-header">
+        <span class="decider-badge" id="decider-3" title="">?</span>
         <span class="name" id="name-3">左家</span>
         <span class="hand-size" id="size-3">27</span>张
         <span class="finished-tag" id="finish-3" style="display:none">已完成</span>
@@ -53,12 +57,14 @@
       <div class="zone-body">
         <div class="play-display" id="play-3"></div>
         <div class="debug-cards-inline" id="debug-hand-3" style="display:none"></div>
+        <div class="llm-bubble left" id="llm-bubble-3" style="display:none"></div>
       </div>
     </div>
 
     <!-- Right player -->
     <div class="player-zone right" id="zone-1">
       <div class="zone-header">
+        <span class="decider-badge" id="decider-1" title="">?</span>
         <span class="name" id="name-1">右家</span>
         <span class="hand-size" id="size-1">27</span>张
         <span class="finished-tag" id="finish-1" style="display:none">已完成</span>
@@ -66,6 +72,7 @@
       <div class="zone-body">
         <div class="play-display" id="play-1"></div>
         <div class="debug-cards-inline" id="debug-hand-1" style="display:none"></div>
+        <div class="llm-bubble right" id="llm-bubble-1" style="display:none"></div>
       </div>
     </div>
 
@@ -80,6 +87,7 @@
     <!-- Human (bottom) -->
     <div class="player-zone you" id="zone-0">
       <div class="zone-header">
+        <span class="decider-badge human" id="decider-0" title="">?</span>
         <span class="name you" id="name-0">你</span>
         <span class="hand-size" id="size-0">27</span>张
         <span class="finished-tag" id="finish-0" style="display:none">已完成</span>

@@ -48,6 +48,23 @@ _builder.param(_ism, "sampler", "select", "random", label="采样器",
 _builder.param(_ism, "inner", "ref", "informed", label="内层模型", ref_category="inner_model")
 _builder.param(_ism, "enumerator", "ref", "full", label="候选枚举", ref_category="enumerator")
 
+# LLM
+_llm = _builder.model("decider", "llm", "LLM 大模型",
+    description="DeepSeek API 端到端决策。API Key 从 DEEPSEEK_API_KEY 环境变量读取。")
+_builder.param(_llm, "model", "select", "deepseek-reasoner", label="模型",
+               options={"deepseek-chat": "DeepSeek V3", "deepseek-reasoner": "DeepSeek R1 (思考模式)"})
+_builder.param(_llm, "mode", "select", "candidate", label="模式",
+               options={"candidate": "候选模式(LLM选候选)", "free": "自由模式(LLM直接选牌)"})
+_builder.param(_llm, "candidate_order", "select", "natural", label="候选排序",
+               options={"natural": "自然顺序", "by_length_desc": "多牌优先"})
+_builder.param(_llm, "max_candidates", "int", 200, label="最大候选数")
+_builder.param(_llm, "temperature", "float", 0.6, label="温度", step=0.05)
+_builder.param(_llm, "max_tokens", "int", 1024, label="最大Token")
+_builder.param(_llm, "timeout_s", "float", 45.0, label="超时(秒)", step=1.0)
+_builder.param(_llm, "max_retries", "int", 2, label="最大重试")
+_builder.param(_llm, "fallback_agent", "select", "heuristic", label="降级策略",
+               options={"heuristic": "HeuristicAgent", "mc": "MonteCarloAgent", "pass": "直接过牌"})
+
 # --- Category: inner_model (MC simulation internal) ---
 _inn = _builder.category("inner_model", "内层模型", "MC模拟内部使用，需完全信息")
 
@@ -192,6 +209,11 @@ def create_agent_for_player(config: dict, player_id: int):
             num_samples=int(params.get("num_samples", 128)),
             time_limit_ms=int(params.get("time_limit_ms", 10000)),
             config=config)
+    elif decider_id == "llm":
+        from .llm import LLMAgent, LLMConfig
+        llm_fields = {f.name for f in LLMConfig.__dataclass_fields__.values()}
+        llm_params = {k: v for k, v in params.items() if k in llm_fields}
+        return LLMAgent(config=LLMConfig(**llm_params))
     else:
         return _make_inner_agent("blind", params)
 

@@ -24,6 +24,14 @@ from ..state_utils import apply_play, start_new_trick, next_active_player
 from ..table import TableState
 
 
+_DECIDER_ICONS = {
+    "blind": "B",
+    "mc": "MC",
+    "ismcts": "TS",
+    "llm": "AI",
+}
+
+
 class InteractiveGame:
     """Manages one Guandan game session with step-by-step human interaction.
 
@@ -32,7 +40,7 @@ class InteractiveGame:
 
     HUMAN_ID = 0
 
-    def __init__(self, level: int = 2, agent_timeout_ms: float = 30000):
+    def __init__(self, level: int = 2, agent_timeout_ms: float = 75000):
         self.level = level
         self.agent_timeout_ms = agent_timeout_ms
         self.team_levels = [level, level]
@@ -438,6 +446,42 @@ class InteractiveGame:
     # State serialization
     # ------------------------------------------------------------------
 
+    def _get_player_decider_info(self, player_id: int) -> dict:
+        """Get human-readable decider info for a player from config."""
+        from ..ai.registry import get_schema
+        schema = get_schema()
+        decider_cat = schema.get("decider", {}).get("models", {})
+
+        player_cfg = self.config.get("players", {}).get(str(player_id), {})
+        decider_id = player_cfg.get("decider")
+        if not decider_id:
+            decider_id = self.config.get("decider", {}).get("default_model", "mc")
+
+        decider_def = decider_cat.get(decider_id, {})
+        label = decider_def.get("name", decider_id)
+        icon = _DECIDER_ICONS.get(decider_id, "?")
+        description = decider_def.get("description", "")
+
+        # Extract key params for display
+        params = player_cfg.get("params") or {}
+        defaults = self.config.get("decider", {}).get("model_params", {}).get(decider_id, {})
+        merged = {**defaults, **params}
+
+        param_summary = []
+        param_defs = decider_def.get("params", {})
+        for k, v in merged.items():
+            pdef = param_defs.get(k, {})
+            plabel = pdef.get("label", k)
+            param_summary.append(f"{plabel}={v}")
+
+        return {
+            "id": decider_id,
+            "label": label,
+            "icon": icon,
+            "description": description,
+            "params": param_summary[:6],  # limit to 6 key params
+        }
+
     def _build_state(self, error: str = "", message: str = "") -> dict:
         if self.state is None:
             return {
@@ -480,6 +524,7 @@ class InteractiveGame:
                 "hand_size": 0 if is_finished else len(self.state.hands[p]),
                 "finished": is_finished,
                 "is_human": p == self.HUMAN_ID,
+                "decider": self._get_player_decider_info(p),
             })
 
         # Table combo

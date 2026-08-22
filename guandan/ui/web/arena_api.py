@@ -45,6 +45,15 @@ def _cards_json(card_ids: list, level: int = 2) -> list:
     return [_card_json(Card.from_id(i), level) for i in card_ids]
 
 
+def _rank_signature(card_ids) -> tuple:
+    """Rank-multiset of card IDs, used for intent-based correctness comparison.
+
+    Scenarios' `expected_play` picks fresh cards of the same ranks as the hand
+    (not the hand's actual IDs), so exact-ID equality is wrong — compare ranks.
+    """
+    return tuple(sorted(Card.from_id(i).rank.value for i in card_ids))
+
+
 # ==================================================================
 # _build_view — construct a PlayerView from a scenario
 # ==================================================================
@@ -374,6 +383,13 @@ def _make_arena_agent(profile: dict):
     model_id = profile.get("id", "blind")
     label = profile.get("label", model_id)
 
+    # LLM — build LLMAgent directly (it implements .analyze())
+    if model_id == "llm":
+        from ...ai.llm import LLMAgent, LLMConfig
+        llm_fields = {f.name for f in LLMConfig.__dataclass_fields__.values()}
+        llm_params = {k: v for k, v in profile.items() if k in llm_fields}
+        return LLMAgent(config=LLMConfig(**llm_params)), label or "LLM"
+
     # Non-MC deciders — use TestableModel directly, pass all profile params
     if model_id not in ("mc", "ismcts"):
         # Extract model constructor params (filter out metadata keys)
@@ -672,7 +688,7 @@ def benchmark():
             if scenario.expected_pass:
                 correct = result.pass_chosen
             elif scenario.expected_play and result.choice:
-                correct = set(result.choice.card_ids) == set(scenario.expected_play)
+                correct = _rank_signature(result.choice.card_ids) == _rank_signature(scenario.expected_play)
 
             results.append({
                 "scenario_id": scenario.id, "scenario_name": scenario.name,

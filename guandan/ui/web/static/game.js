@@ -35,6 +35,7 @@ function schedulePoll() {
     render();
     if (debugMode) fetchDebug();
     if (aiDebugOpen || showWinRate) fetchAILog();
+    if (llmThinkingOpen) fetchLLMReasoning();
     if (gameState.my_turn || gameState.game_over || gameState.round_over) {
       stopPolling();
     } else {
@@ -215,7 +216,9 @@ function render() {
   if (!started) {
     document.getElementById('message').textContent = gameState.message || '点击「开始游戏」';
     for (let p = 0; p < 4; p++) {
-      document.getElementById('size-' + p).textContent = gameState.players[p].hand_size;
+      const info = gameState.players[p];
+      document.getElementById('size-' + p).textContent = info.hand_size;
+      renderDeciderBadge(p, info.decider);
     }
     renderHand(gameState.my_hand);
     if (debugMode) fetchDebug();
@@ -238,6 +241,8 @@ function render() {
     // Highlight thinking AI
     const thinking = gameState.ai_thinking_player;
     zone.classList.toggle('thinking-zone', thinking >= 0 && thinking === p);
+    // Decider badge
+    renderDeciderBadge(p, info.decider);
   }
 
   renderTrickHistory(gameState.trick_history || []);
@@ -270,6 +275,33 @@ function render() {
   }
 
   renderHistory(gameState.round_results || []);
+}
+
+function renderDeciderBadge(p, decider) {
+  const el = document.getElementById('decider-' + p);
+  if (!el) return;
+  // Human player always shows '你'
+  if (p === 0) {
+    el.textContent = '你';
+    el.className = 'decider-badge human';
+    el.title = '人类玩家';
+    return;
+  }
+  if (!decider) { decider = { id: '?', label: '?', icon: '?', params: [], description: '' }; }
+  el.textContent = decider.icon;
+  el.className = 'decider-badge';
+  if (decider.id === 'llm') el.classList.add('decider-llm');
+  else if (decider.id === 'mc') el.classList.add('decider-mc');
+  else if (decider.id === 'ismcts') el.classList.add('decider-ismcts');
+  else if (decider.id === 'blind') el.classList.add('decider-blind');
+  // Build tooltip
+  var parts = [decider.label];
+  if (decider.description) parts.push(decider.description);
+  if (decider.params && decider.params.length) {
+    parts.push('---');
+    parts = parts.concat(decider.params);
+  }
+  el.title = parts.join('\n');
 }
 
 function renderTrickHistory(history) {
@@ -524,6 +556,102 @@ async function clearAILog() {
   await gameApi.clearAILog();
   document.getElementById('ai-debug-content').innerHTML =
     '<div style="color:#888;padding:10px">日志已清空</div>';
+}
+
+// LLM Thought Bubbles — per-player floating bubbles on the table
+let llmThinkingOpen = true;
+let _llmBubbleData = {};  // {pid: {choice, reasoning, ...}}
+
+function toggleLLMBubbles() {
+  llmThinkingOpen = !llmThinkingOpen;
+  const btn = document.getElementById('btn-llm-think');
+  if (llmThinkingOpen) {
+    btn.style.background = '#9b59b6'; btn.style.color = '#fff';
+    for (let p = 1; p <= 3; p++) {
+      const b = document.getElementById('llm-bubble-' + p);
+      if (b && _llmBubbleData[p]) b.style.display = 'block';
+    }
+    fetchLLMReasoning();
+  } else {
+    btn.style.background = '#555'; btn.style.color = '#999';
+    for (let p = 1; p <= 3; p++) {
+      const b = document.getElementById('llm-bubble-' + p);
+      if (b) b.style.display = 'none';
+    }
+  }
+}
+
+async function fetchLLMReasoning() {
+  if (!llmThinkingOpen) return;
+  try {
+    const resp = await fetch('/api/llm_reasoning');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    renderLLMReasoning(data);
+  } catch (e) { /* silent */ }
+}
+
+function renderLLMReasoning(data) {
+  const entries = data.entries || [];
+  // Index by player
+  const byPlayer = {};
+  for (const e of entries) { byPlayer[e.player] = e; }
+  _llmBubbleData = byPlayer;
+
+  for (let p = 1; p <= 3; p++) {
+    const bubble = document.getElementById('llm-bubble-' + p);
+    if (!bubble) continue;
+    const e = byPlayer[p];
+    if (!e) {
+      bubble.style.display = 'none';
+      continue;
+    }
+    if (!llmThinkingOpen) continue;
+    bubble.style.display = 'block';
+    bubble.classList.remove('stale');
+
+    const choice = e.choice || '?';
+    const cards = (e.cards || []).join(' ');
+    const elapsed = e.elapsed_ms ? (e.elapsed_ms / 1000).toFixed(1) + 's' : '';
+    const reasoning = e.reasoning || '';
+    const isFallback = choice.startsWith('FALLBACK');
+    const shortReasoning = reasoning.length > 80 ? reasoning.slice(0, 80) + '...' : reasoning;
+    const sc = e.success_count != null ? ' ok' + e.success_count + '/fb' + (e.fallback_count||0) : '';
+
+    let html = '';
+    if (isFallback) {
+      html += '<div class="bubble-choice" style="color:#e67e22">' + escapeHtml(choice) + '</div>';
+    } else {
+      html += '<div class="bubble-choice">' + escapeHtml(choice) + '</div>';
+      if (cards) html += '<div class="bubble-choice" style="font-size:0.85em;color:#aaa">' + escapeHtml(cards) + '</div>';
+    }
+    if (reasoning && !isFallback) {
+      const full = reasoning.length > 1500 ? reasoning.slice(0, 1500) + '\n\n... (truncated)' : reasoning;
+      html += '<div class="bubble-reason" data-full="' + escapeAttr(full) + '" data-short="' + escapeAttr(shortReasoning) + '">' + escapeHtml(shortReasoning) + '</div>';
+    }
+    html += '<div class="bubble-meta">' + elapsed + ' ' + sc + '</div>';
+    bubble.innerHTML = html;
+
+    // Click to expand/collapse reasoning
+    const reasonDiv = bubble.querySelector('.bubble-reason');
+    if (reasonDiv) {
+      bubble.onclick = function() {
+        const expanded = reasonDiv.classList.toggle('expanded');
+        reasonDiv.textContent = expanded
+          ? (reasonDiv.getAttribute('data-full') || '')
+          : (reasonDiv.getAttribute('data-short') || '');
+      };
+    }
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+function escapeAttr(text) {
+  return text.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function renderAILog(data) {
@@ -859,6 +987,7 @@ if (window.__INITIAL_STATE__) {
   gameState = window.__INITIAL_STATE__;
   render();
   if (debugMode) fetchDebug();
+  if (llmThinkingOpen) fetchLLMReasoning();
   // Sync button states with default-on flags
   const wrBtn = document.getElementById('btn-winrate');
   if (wrBtn) { wrBtn.style.background = '#27ae60'; wrBtn.style.color = '#fff'; }
@@ -1033,4 +1162,6 @@ async function applyConfig() {
   const msg = document.getElementById('message'); msg.textContent = 'AI设置已保存'; msg.style.color = '#27ae60';
   setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 1500);
   await fetchConfig();
+  // Immediately refresh game state so decider badges update
+  fetchState();
 }

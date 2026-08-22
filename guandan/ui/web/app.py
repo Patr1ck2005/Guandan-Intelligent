@@ -16,6 +16,9 @@ import time
 import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()  # load DEEPSEEK_API_KEY from .env before any LLM imports
+
 from flask import Flask, jsonify, render_template, request, session
 
 from ..interactive import InteractiveGame
@@ -244,6 +247,90 @@ def api_ai_log_clear():
     from ...logging import game_logger
     game_logger.clear()
     return jsonify({"ok": True})
+
+
+@app.route("/api/llm_reasoning")
+def api_llm_reasoning():
+    """Return LLM reasoning + decision + fallback events per player."""
+    from ...logging import game_logger
+    entries = game_logger.query(category="ai", count=500)
+    reasoning = {}   # pid -> {reasoning, ...}
+    decisions = {}   # pid -> [{choice, cards, ...}]
+    fallbacks = []   # [{player, error, elapsed_ms}]
+
+    for e in entries:
+        etype = e.get("type", "")
+        pid = e.get("player", -1)
+        data = e.get("data", {})
+
+        if etype == "llm_reasoning":
+            reasoning[pid] = {
+                "player": pid,
+                "reasoning": data.get("reasoning", ""),
+            }
+        elif etype == "llm_decision_end":
+            decisions.setdefault(pid, []).append({
+                "player": pid,
+                "choice": data.get("choice", "?"),
+                "cards": data.get("cards", []),
+                "elapsed_ms": data.get("elapsed_ms", 0),
+                "tokens": data.get("tokens", 0),
+                "mode": data.get("mode", "?"),
+                "model": data.get("model", "?"),
+                "success_count": data.get("success_count", 0),
+                "fallback_count": data.get("fallback_count", 0),
+            })
+        elif etype == "llm_fallback":
+            fallbacks.append({
+                "player": pid,
+                "error": data.get("error_msg", "")[:200],
+                "elapsed_ms": data.get("elapsed_ms", 0),
+                "fallback_count": data.get("fallback_count", 0),
+            })
+
+    # Merge reasoning with their matching decisions
+    entries_out = []
+    for pid, r in reasoning.items():
+        entry = dict(r)
+        decs = decisions.get(pid, [])
+        if decs:
+            last = decs[-1]
+            entry["choice"] = last["choice"]
+            entry["cards"] = last["cards"]
+            entry["elapsed_ms"] = last["elapsed_ms"]
+            entry["tokens"] = last["tokens"]
+            entry["mode"] = last["mode"]
+            entry["model"] = last["model"]
+            entry["success_count"] = last["success_count"]
+            entry["fallback_count"] = last["fallback_count"]
+        entries_out.append(entry)
+    entries_out.sort(key=lambda x: x["player"])
+
+    # Include decisions with no reasoning (e.g. fast V3 responses)
+    for pid, decs in decisions.items():
+        if pid not in reasoning:
+            entry = decs[-1].copy()
+            entry["reasoning"] = ""
+            entries_out.append(entry)
+
+    # Filter: if llm_fallback exists but no success, show that
+    for fb in fallbacks:
+        pid = fb["player"]
+        if pid not in [e["player"] for e in entries_out]:
+            entries_out.append({
+                "player": pid,
+                "reasoning": "",
+                "choice": f'FALLBACK: {fb["error"]}',
+                "cards": [],
+                "elapsed_ms": fb["elapsed_ms"],
+                "fallback_count": fb["fallback_count"],
+            })
+
+    entries_out.sort(key=lambda x: x["player"])
+    return jsonify({
+        "entries": entries_out,
+        "has_llm_activity": len(entries_out) > 0 or len(fallbacks) > 0,
+    })
 
 
 @app.route("/api/config", methods=["GET", "POST"])

@@ -34,7 +34,7 @@ class Game:
     MAX_TRICKS_PER_ROUND = 500
     MAX_TRICK_ITERATIONS = 200
 
-    def __init__(self, agents: List, level: int = 2, agent_timeout_ms: float = 30000):
+    def __init__(self, agents: List, level: int = 2, agent_timeout_ms: float = 75000):
         if len(agents) != 4:
             raise ValueError(f"Need exactly 4 agents, got {len(agents)}")
         self.agents = agents
