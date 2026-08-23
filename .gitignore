@@ -30,3 +30,10 @@ instance/
 # log
 *.log
 logs/
+
+# Temp verification scripts & screenshots (local testing only)
+_bench_llm.py
+_check.js
+_interact.js
+_shot.js
+_screenshots/
