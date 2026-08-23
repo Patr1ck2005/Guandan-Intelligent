@@ -54,12 +54,13 @@ def generate_synthetic_scenarios(n: int = 50, level: int = 2,
                                  max_cards_per_player: int = 4,
                                  seed: int = 0,
                                  time_limit_ms: int = 5000,
-                                 progress_cb=None) -> List[Scenario]:
+                                 progress_cb=None, live_cb=None) -> List[Scenario]:
     """Generate endgame scenarios labelled by the exact solver (oracle).
 
     Each is a random small-hand LEAD position; the solver's optimal lead becomes
     ``expected_play``. Inconclusive solves (timeout / pass / no choice) are skipped.
     ``progress_cb(done, total, message)`` is called after each attempt.
+    ``live_cb(detail_dict)`` reports {solved, skipped, of_n} for the dashboard.
     """
     rng = random.Random(seed)
     scenarios: List[Scenario] = []
@@ -97,6 +98,9 @@ def generate_synthetic_scenarios(n: int = 50, level: int = 2,
         except Exception:
             pass  # solver error — skip this attempt
 
+        if live_cb:
+            live_cb({"solved": len(scenarios), "skipped": attempts - len(scenarios),
+                     "of_n": n, "attempts": attempts})
         if progress_cb:
             skipped = attempts - len(scenarios)
             progress_cb(len(scenarios), n, f"已生成 {len(scenarios)}/{n}（跳过 {skipped}）")

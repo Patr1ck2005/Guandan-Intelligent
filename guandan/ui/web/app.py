@@ -646,11 +646,39 @@ _COMBO_TYPE_CN = {
 
 if __name__ == "__main__":
     import os
+    import socket
+    import threading
+    import webbrowser
+
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+
+    # Pick the first free port from GUANDAN_PORT (default 8765) upward —
+    # other services may have taken our usual port.
+    port = int(os.environ.get("GUANDAN_PORT", "8765"))
+
+    def _port_in_use(p: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.2)
+            return s.connect_ex(("127.0.0.1", p)) == 0
+
+    for _ in range(20):
+        if not _port_in_use(port):
+            break
+        print(f"  端口 {port} 被占用，尝试 {port + 1} ...")
+        port += 1
+
+    url = f"http://localhost:{port}/"
     print("=" * 50)
     print("  掼蛋 Guandan — Web UI")
-    print("  Main menu: http://localhost:8765")
-    print("  Game:      http://localhost:8765/game")
-    print("  Arena:     http://localhost:8765/arena")
+    print(f"  Main menu: {url}")
+    print(f"  Game:      http://localhost:{port}/game")
+    print(f"  Arena:     http://localhost:{port}/arena")
+    print(f"  Eval Lab:  http://localhost:{port}/eval")
     print("=" * 50)
-    app.run(debug=debug, host="0.0.0.0", port=8765)
+
+    # Open the browser automatically once the server is accepting connections
+    # (unless GUANDAN_NO_BROWSER=1, e.g. when launched by scripts).
+    if os.environ.get("GUANDAN_NO_BROWSER", "") != "1":
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    app.run(debug=debug, host="0.0.0.0", port=port)

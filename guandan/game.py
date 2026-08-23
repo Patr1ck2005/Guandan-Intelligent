@@ -132,6 +132,7 @@ class Game:
         leader = next_active_player(self.state, self.state.current_player)
         self.state.table.reset_for_new_trick(leader)
         current = leader
+        moved_combo = None  # combo played this iteration (None = pass), for on_move
         game_logger.game_debug("trick_start", trick=self.state.trick_number,
                                leader=leader)
         _iter = 0
@@ -197,6 +198,7 @@ class Game:
             if play_cards:
                 # Play: update table and hand
                 combo = result.resolved_combo
+                moved_combo = combo
                 self.state.table.record_play(current, combo)
                 # Remove cards from hand
                 played_ids = {c.id for c in play_cards}
@@ -223,12 +225,13 @@ class Game:
                         break
             else:
                 # Pass
+                moved_combo = None
                 self.state.table.record_pass(current)
                 game_logger.game_debug("pass", player=current,
                                        trick=self.state.trick_number)
 
             if self.on_move:
-                self.on_move(self)
+                self.on_move(self, current, moved_combo)
 
             # Next player (clockwise, skip finished)
             current = (current + 1) % 4

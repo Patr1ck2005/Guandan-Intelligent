@@ -51,7 +51,7 @@ def _new_job() -> str:
             j["message"] = "被新任务取代，正在停止…"
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running", "progress": 0.0, "message": "",
-                  "cancel": False, "result": None, "error": None,
+                  "detail": {}, "cancel": False, "result": None, "error": None,
                   "started_at": time.time()}
     return jid
 
@@ -61,6 +61,12 @@ def _set_progress(job_id: str, progress: float, message: str):
     if job:
         job["progress"] = max(0.0, min(1.0, progress))
         job["message"] = message
+
+
+def _set_detail(job_id: str, detail: dict):
+    job = _jobs.get(job_id)
+    if job:
+        job["detail"] = detail
 
 
 def _is_cancelled(job_id: str) -> bool:
@@ -74,9 +80,12 @@ def _spawn(jid: str, fn):
             raise JobCancelled("cancelled")
         _set_progress(jid, done / total if total else 1.0, message)
 
+    def live_cb(detail):
+        _set_detail(jid, detail)
+
     def target():
         try:
-            _jobs[jid]["result"] = fn(progress_cb)
+            _jobs[jid]["result"] = fn(progress_cb, live_cb)
             _jobs[jid]["status"] = "done"
             _jobs[jid]["progress"] = 1.0
             _jobs[jid]["message"] = "完成"
@@ -136,10 +145,11 @@ def generate_scenarios():
 
     jid = _new_job()
 
-    def gen(progress_cb):
+    def gen(progress_cb, live_cb):
         scenarios = generate_synthetic_scenarios(
             n=n, level=level, max_cards_per_player=max_cards,
-            seed=seed, time_limit_ms=time_limit_ms, progress_cb=progress_cb)
+            seed=seed, time_limit_ms=time_limit_ms,
+            progress_cb=progress_cb, live_cb=live_cb)
         get_bank().add(scenarios)
         return {"generated": len(scenarios),
                 "scenarios": [scenario_json(s) for s in scenarios]}
@@ -163,8 +173,9 @@ def benchmark():
 
     jid = _new_job()
 
-    def run(progress_cb):
-        return run_scenario_benchmark(scenarios, model_profiles, progress_cb=progress_cb)
+    def run(progress_cb, live_cb):
+        return run_scenario_benchmark(scenarios, model_profiles,
+                                      progress_cb=progress_cb, live_cb=live_cb)
 
     _spawn(jid, run)
     return jsonify({"job_id": jid})
@@ -182,10 +193,10 @@ def match():
 
     jid = _new_job()
 
-    def run(progress_cb):
+    def run(progress_cb, live_cb):
         m = run_match(profile_a, profile_b, n_games=n_games, base_seed=base_seed,
                       agent_timeout_ms=agent_timeout_ms, max_workers=max_workers,
-                      progress_cb=progress_cb)
+                      progress_cb=progress_cb, live_cb=live_cb)
         return m.to_dict()
 
     _spawn(jid, run)
@@ -203,10 +214,11 @@ def round_robin():
 
     jid = _new_job()
 
-    def run(progress_cb):
+    def run(progress_cb, live_cb):
         return run_round_robin(profiles, n_games=n_games, base_seed=base_seed,
                                agent_timeout_ms=agent_timeout_ms,
-                               max_workers=max_workers, progress_cb=progress_cb)
+                               max_workers=max_workers,
+                               progress_cb=progress_cb, live_cb=live_cb)
 
     _spawn(jid, run)
     return jsonify({"job_id": jid})
@@ -223,6 +235,7 @@ def job_status(job_id):
         "status": job["status"],
         "progress": job["progress"],
         "message": job.get("message", ""),
+        "detail": job.get("detail") or {},
         "result": job["result"],
         "error": job["error"],
     })
@@ -245,9 +258,10 @@ def cancel_job(job_id):
 # ------------------------------------------------------------------
 
 def run_scenario_benchmark(scenarios, model_profiles, perspective: int = 0,
-                           progress_cb=None) -> dict:
+                           progress_cb=None, live_cb=None) -> dict:
     """Run models across scenarios. ``progress_cb(done, total, message)`` is
-    called after each (scenario, model) is evaluated."""
+    called after each (scenario, model) is evaluated; ``live_cb(detail)``
+    carries the partial leaderboard + current cell for the live dashboard."""
     results = []
     by_model = {}
     total = len(scenarios) * len(model_profiles)
@@ -301,6 +315,27 @@ def run_scenario_benchmark(scenarios, model_profiles, perspective: int = 0,
                 progress_cb(done, total,
                             f"场景 {si + 1}/{len(scenarios)} · {scenario.name} · "
                             f"模型 {mi + 1}/{len(model_profiles)} · {name}")
+            if live_cb:
+                partial = [{
+                    "model": mid_, "model_name": s["name"],
+                    "accuracy": round(s["correct"] / s["total"] * 100, 1),
+                    "correct": s["correct"], "total": s["total"],
+                    "avg_ms": round(s["ms"] / s["total"], 1),
+                } for mid_, s in by_model.items()]
+                partial.sort(key=lambda x: x["accuracy"], reverse=True)
+                last = results[-1] if results else {}
+                live_cb({
+                    "si": si + 1, "n_scenarios": len(scenarios),
+                    "scenario_name": scenario.name,
+                    "mi": mi + 1, "n_models": len(model_profiles),
+                    "model_name": name,
+                    "done": done, "total": total,
+                    "last_correct": bool(last.get("correct")),
+                    "last_ms": round(float(last.get("elapsed_ms") or 0), 1),
+                    "matrix": [[r.get("correct"), r.get("error")]
+                               for r in results],
+                    "partial_summary": partial,
+                })
 
     summary = []
     for mid, s in by_model.items():

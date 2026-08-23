@@ -148,6 +148,64 @@ class TestProgressCallbacks:
         assert all(total == dones[-1] for _, total in calls)
         assert calls[-1][0] == calls[-1][1]  # final callback reports completion
 
+    def test_run_match_live_cb(self):
+        from guandan.eval.selfplay import run_match
+        details = []
+
+        def live(detail):
+            details.append(detail)
+
+        run_match({"id": "blind"}, {"id": "blind"}, n_games=1, base_seed=0, live_cb=live)
+        assert len(details) >= 10  # a full game is many moves
+        d = details[-1]
+        # Dashboard keys present
+        for key in ("game", "n_games", "move", "trick", "hand_sizes",
+                    "last_player", "last_action", "last_combo_type",
+                    "last_move_ms", "avg_move_ms", "moves_per_sec",
+                    "think_ms", "move_ms_hist", "scores"):
+            assert key in d, f"missing key: {key}"
+        assert len(d["hand_sizes"]) == 4
+        assert d["last_action"] in ("play", "pass")
+        assert d["think_ms"][0] >= 0 and d["think_ms"][1] >= 0
+        assert len(d["move_ms_hist"]) <= 60  # sparkline window is bounded
+        # During the last live callback the game hasn't been patched yet → the
+        # in-progress placeholder (-2); completed games carry 0/1/-1.
+        assert all(s in (-2, -1, 0, 1) for s in d["scores"])
+        # hand_sizes sum decreases over the game (cards leave hands)
+        first = details[0]
+        assert sum(first["hand_sizes"]) >= sum(d["hand_sizes"])
+
+    def test_round_robin_progress_passthrough(self):
+        from guandan.eval.selfplay import run_round_robin
+        calls = []
+        run_round_robin([{"id": "blind"}, {"id": "blind"}], n_games=1,
+                        base_seed=0, progress_cb=lambda d, t, m: calls.append(d))
+        # Sub-match move progress folds into pair slices → more than 1 call per pair
+        assert len(calls) > 1
+        assert calls[-1] == 1  # final: pair 1 of 1 complete (done == n_pairs)
+
+    def test_game_on_move_signature(self):
+        """Game.on_move receives (game, player:int, combo|None)."""
+        from guandan.game import Game
+        from guandan.eval.selfplay import build_player_agent
+        seen = []
+
+        def cb(game, player, combo):
+            seen.append((player, combo))
+            if len(seen) >= 3:
+                raise KeyboardInterrupt  # stop the game early
+
+        agents = [build_player_agent({"id": "blind"}) for _ in range(4)]
+        game = Game(agents, level=2, on_move=cb)
+        try:
+            game.play_game()
+        except KeyboardInterrupt:
+            pass
+        assert len(seen) >= 3
+        for player, combo in seen:
+            assert isinstance(player, int) and 0 <= player <= 3
+            assert combo is None or hasattr(combo, "combo_type")
+
     def test_benchmark_progress(self):
         from guandan.eval.eval_api import run_scenario_benchmark
         from guandan.eval.scenario_bank import load_curated_scenarios

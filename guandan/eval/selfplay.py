@@ -93,12 +93,15 @@ class MatchResult:
 
 def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
               base_seed: int = 0, agent_timeout_ms: float = 75000,
-              max_workers: int = 1, progress_cb=None) -> MatchResult:
+              max_workers: int = 1, progress_cb=None, live_cb=None) -> MatchResult:
     """Run a 2v2 match (A seats 0/2, B seats 1/3) over ``n_games`` games.
 
     ``max_workers=1`` (default) is sequential and deterministic for a given
     seed. ``max_workers>1`` parallelizes across games but shares the global
     RNG, so individual games are still valid but not seed-reproducible.
+
+    ``live_cb(detail_dict)`` is called after every move with a dashboard
+    snapshot (hand sizes, move timing, per-team think time...).
     """
     t0 = time.time()
     _lock = threading.Lock()
@@ -110,6 +113,9 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
     _st = {"completed": 0, "window": 0.0}
     _cnt = {"n": 0}
     MOVES_PER_GAME_ESTIMATE = 250  # a long blind game can exceed 150 moves
+    MAX_HIST = 60  # sparkline window (recent move durations, ms)
+    _live = {"t_last": None, "last_move_ms": 0.0, "move_ms_sum": 0.0,
+             "think_ms": [0.0, 0.0], "hist": [], "scores": []}
 
     def _emit(message: str):
         if not progress_cb:
@@ -118,11 +124,40 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             frac = min((_st["completed"] + min(_st["window"], 0.95)) / n_games, 1.0)
         progress_cb(int(frac * 100), 100, message)
 
-    def on_move(_game):
+    def on_move(game, player: int, combo):
         """Called by Game after every play/pass so the bar moves continuously."""
+        t_move = time.time()
         _cnt["n"] += 1
         with _lock:
             _st["window"] = min(_cnt["n"] / MOVES_PER_GAME_ESTIMATE, 0.95)
+            last_ms = 0.0 if _live["t_last"] is None else (t_move - _live["t_last"]) * 1000
+            _live["t_last"] = t_move
+            _live["last_move_ms"] = last_ms
+            _live["move_ms_sum"] += last_ms
+            team = player % 2  # seats 0/2 = A(team0), 1/3 = B(team1)
+            _live["think_ms"][team] += last_ms
+            _live["hist"].append(last_ms)
+            if len(_live["hist"]) > MAX_HIST:
+                del _live["hist"][:len(_live["hist"]) - MAX_HIST]
+        if live_cb:
+            table = game.state.table
+            live_cb({
+                "game": min(_st["completed"] + 1, n_games), "n_games": n_games,
+                "move": _cnt["n"], "trick": game.state.trick_number,
+                "round_number": game.state.round_number,
+                "hand_sizes": [len(h) for h in game.state.hands],
+                "last_player": player,
+                "last_action": "pass" if combo is None else "play",
+                "last_combo_type": "" if combo is None else combo.combo_type.name,
+                "last_combo_cards": [] if combo is None else [c.display for c in combo.cards],
+                "last_move_ms": round(last_ms, 1),
+                "avg_move_ms": round(_live["move_ms_sum"] / max(1, _cnt["n"]), 1),
+                "moves_per_sec": round(_cnt["n"] / max(1e-9, t_move - t0), 2),
+                "think_ms": [round(_live["think_ms"][0]), round(_live["think_ms"][1])],
+                "move_ms_hist": list(_live["hist"]),
+                "trick_leader": table.last_played_player,
+                "scores": list(_live["scores"]),
+            })
         if _cnt["n"] % 5 == 0:
             with _lock:
                 done = _st["completed"]
@@ -138,6 +173,8 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             build_player_agent(profile_b),  # seat 3 (team 1)
         ]
         _cnt["n"] = 0
+        with _lock:
+            _live["t_last"] = None  # avoid inter-game gap counting as a move
         game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms, on_move=on_move)
         try:
             result = game.play_game()
@@ -150,8 +187,12 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
     games: List[GameRecord] = []
     if max_workers <= 1:
         for i in range(n_games):
-            games.append(play_one(i))
             with _lock:
+                _live["scores"].append(-2)  # placeholder; patched on completion
+            rec = play_one(i)
+            games.append(rec)
+            with _lock:
+                _live["scores"][-1] = rec.winning_team
                 _st["completed"] = i + 1
                 _st["window"] = 0.0
             aw = sum(1 for g in games if g.winning_team == 0)
@@ -161,9 +202,11 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             futures = [ex.submit(play_one, i) for i in range(n_games)]
             completed = 0
             for fut in as_completed(futures):
-                games.append(fut.result())
+                rec = fut.result()
+                games.append(rec)
                 completed += 1
                 with _lock:
+                    _live["scores"].append(rec.winning_team)
                     _st["completed"] = max(_st["completed"], completed)
                     _st["window"] = 0.0
                 aw = sum(1 for g in games if g.winning_team == 0)
@@ -180,11 +223,13 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
 
 def run_round_robin(profiles: List[dict], n_games: int = 10, base_seed: int = 0,
                     agent_timeout_ms: float = 75000, max_workers: int = 1,
-                    progress_cb=None) -> dict:
+                    progress_cb=None, live_cb=None) -> dict:
     """Run a round-robin across all profiles and return an Elo ranking.
 
     Returns ``{"ranking": [{model, rating, wins, losses}], "matches": [...]}``.
-    ``progress_cb(done, total, message)`` is called after each match.
+    ``progress_cb(done, total, message)`` is called after each match (sub-match
+    move progress folds into the pair's slice). ``live_cb(detail_dict)``
+    forwards the current sub-match dashboard plus an Elo snapshot.
     """
     ratings = {i: 1500.0 for i in range(len(profiles))}
     wins = {i: 0 for i in range(len(profiles))}
@@ -195,10 +240,33 @@ def run_round_robin(profiles: List[dict], n_games: int = 10, base_seed: int = 0,
     done = 0
     for i in range(len(profiles)):
         for j in range(i + 1, len(profiles)):
+            na = profiles[i].get('label', profiles[i].get('id', '?'))
+            nb = profiles[j].get('label', profiles[j].get('id', '?'))
+
+            def sub_progress(sub_done, sub_total, msg):
+                if progress_cb:
+                    # sub_done is run_match's internal 0..100 percent; fold it
+                    # into this pair's slice so the bar crawls inside a pair.
+                    progress_cb(done * 100 + max(0, min(int(sub_done), 99)),
+                                n_pairs * 100,
+                                f"对局 {done + 1}/{n_pairs} · {na} vs {nb} · {msg}")
+
+            def sub_live(detail):
+                if live_cb:
+                    detail = dict(detail)
+                    detail["rr_pair"] = f"{na} vs {nb}"
+                    detail["rr_done"] = done
+                    detail["rr_total"] = n_pairs
+                    detail["elo"] = [{"label": profiles[k].get(
+                        'label', profiles[k].get('id', '?')),
+                        "rating": round(ratings[k])} for k in sorted(ratings)]
+                    live_cb(detail)
+
             match = run_match(profiles[i], profiles[j], n_games=n_games,
                               base_seed=base_seed + (i * len(profiles) + j) * n_games,
                               agent_timeout_ms=agent_timeout_ms,
-                              max_workers=max_workers)
+                              max_workers=max_workers,
+                              progress_cb=sub_progress, live_cb=sub_live)
             # Elo from completed games only
             completed = match.a_wins + match.b_wins
             if completed > 0:
@@ -213,8 +281,6 @@ def run_round_robin(profiles: List[dict], n_games: int = 10, base_seed: int = 0,
 
             done += 1
             if progress_cb:
-                na = profiles[i].get('label', profiles[i].get('id', '?'))
-                nb = profiles[j].get('label', profiles[j].get('id', '?'))
                 progress_cb(done, n_pairs, f"对局 {done}/{n_pairs} · {na} vs {nb}")
 
     order = sorted(range(len(profiles)), key=lambda k: -ratings[k])

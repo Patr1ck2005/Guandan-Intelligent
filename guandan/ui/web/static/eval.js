@@ -29,7 +29,11 @@ const MODEL_PARAMS = {
 
 let E = {
   mode: 'benchmark',
-  models: [{ id: 'blind', label: 'Blind', params: {} }, { id: 'mc', label: 'MC', params: {} }],
+  // modelDefaults() is hoisted, so it's safe to call during this literal init.
+  // Without it MC would fall back to backend defaults (128 samples / 10s /
+  // informed inner) and a default self-play run would look frozen.
+  models: [{ id: 'blind', label: 'Blind', params: modelDefaults('blind') },
+           { id: 'mc', label: 'MC', params: modelDefaults('mc') }],
   matchA: 0, matchB: 1,
   nGames: 3, seed: 0, timeoutMs: 20000, maxWorkers: 1,
   maxScenarios: 0,
@@ -66,7 +70,16 @@ async function init() {
 }
 
 function setMode(mode) {
-  if (E.jobId) stopJob();  // switching modes cancels any running job + stops its polling
+  // Silent cancel: clear E.jobId FIRST so the pending poll's stale-guard
+  // swallows it — otherwise the "已停止" branch repaints the panel right
+  // after setMode resets it (the ghost-message flash).
+  if (E.jobTimer) { clearTimeout(E.jobTimer); E.jobTimer = null; }
+  if (E.jobId) {
+    const jid = E.jobId;
+    E.jobId = null;
+    fetch('/api/eval/jobs/' + jid + '/cancel', { method: 'POST' }).catch(() => {});
+    renderParamPanel();
+  }
   E.mode = mode;
   document.querySelectorAll('.etab').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   document.getElementById('match-pick').style.display = (mode === 'match') ? '' : 'none';
@@ -274,7 +287,7 @@ async function pollJob(jobId, renderFn) {
       return;
     }
     document.getElementById('eval-result').innerHTML = renderJobProgress(d);
-    E.jobTimer = setTimeout(() => pollJob(jobId, renderFn), 1000);
+    E.jobTimer = setTimeout(() => pollJob(jobId, renderFn), 500);
   } catch (e) {
     if (E.jobId !== jobId) return;
     // Transient failure (server restart, network blip) — retry before declaring death.
@@ -289,17 +302,149 @@ async function pollJob(jobId, renderFn) {
   }
 }
 
+// ------------------------------------------------------------------
+// Live dashboard — mode-aware, reads job detail for rich graphics
+// ------------------------------------------------------------------
+
+const COMBO_CN = { SINGLE: '单张', PAIR: '对子', TRIPLE: '三条', TRIPLE_PAIR: '三带二',
+  STRAIGHT: '顺子', CONSECUTIVE_PAIRS: '连对', CONSECUTIVE_TRIPLES: '钢板',
+  NORMAL_BOMB: '炸弹', STRAIGHT_FLUSH: '同花顺', ROCKET: '天王炸' };
+
 function renderJobProgress(d) {
-  const p = Math.max(0, Math.min(1, d.progress || 0));
-  const pct = Math.round(p * 100);
-  const msg = d.message || '运行中…';
+  const det = d.detail || {};
+  if (det.game !== undefined && det.hand_sizes) return renderMatchLive(d, det);
+  if (det.rr_pair) return renderRRLive(d, det);
+  if (det.partial_summary) return renderBenchLive(d, det);
+  if (det.solved !== undefined) return renderGenLive(d, det);
+  // Generic fallback: bar + message + ETA
+  const head = progressHead(d.progress, d.message, null);
+  return `<div class="job-running">${head}</div>`;
+}
+
+function progressHead(p, msg, extra) {
+  const pct = Math.round(Math.max(0, Math.min(1, p || 0)) * 100);
   const elapsed = E.jobStart ? fmtDuration((Date.now() - E.jobStart) / 1000) : '';
-  const eta = E.jobStart ? computeEta(p) : '';
-  return `<div class="job-running">
+  const eta = computeEta(p);
+  return `<div class="live-head">
+    <span class="chip-run">运行中</span>
+    <span class="big-pct">${pct}<small>%</small></span>
     <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
-    <div class="job-msg">${escapeHtml(msg)}</div>
     <div class="job-eta">已运行 ${elapsed}${eta ? ' · 预计剩余 ' + eta : ''}</div>
+    ${msg ? `<div class="job-msg">${escapeHtml(msg)}</div>` : ''}
+    ${extra || ''}
   </div>`;
+}
+
+function renderMatchLive(d, det) {
+  const aName = (E.models[E.matchA] && (E.models[E.matchA].label || E.models[E.matchA].id)) || 'A';
+  const bName = (E.models[E.matchB] && (E.models[E.matchB].label || E.models[E.matchB].id)) || 'B';
+  const maxHand = 27;
+  const seats = [0, 1, 2, 3].map(p => {
+    const n = det.hand_sizes[p] || 0;
+    const teamCls = p % 2 === 0 ? 'tA' : 'tB';
+    const nm = p % 2 === 0 ? aName : bName;
+    return `<div class="seat-bar"><span class="seat-lb">P${p + 1} ${nm}</span>
+      <div class="seat-track"><div class="seat-fill ${teamCls}" style="width:${Math.round(n / maxHand * 100)}%"></div></div>
+      <span class="seat-n">${n}</span></div>`;
+  }).join('');
+  // Sparkline: recent move durations
+  const hist = det.move_ms_hist || [];
+  const hMax = Math.max(50, ...hist);
+  const spark = hist.map(ms =>
+    `<div class="spark-col${ms > 1000 ? ' slow' : ''}" style="height:${Math.max(2, Math.round(ms / hMax * 40))}px" title="${ms}ms"></div>`
+  ).join('');
+  const thinkTotal = Math.max(1, (det.think_ms || [0, 0]).reduce((a, b) => a + b, 0));
+  const tA = (det.think_ms ? det.think_ms[0] : 0), tB = (det.think_ms ? det.think_ms[1] : 0);
+  const pctA = Math.round(tA / thinkTotal * 100);
+  const lastAct = det.last_action === 'pass'
+    ? `P${(det.last_player ?? -1) + 1} 过牌`
+    : `P${(det.last_player ?? -1) + 1} 出 ${escapeHtml(COMBO_CN[det.last_combo_type] || det.last_combo_type || '?')} <span class="mono">${escapeHtml((det.last_combo_cards || []).join(' '))}</span>`;
+  const stats = [
+    ['当前局', `${det.game}/${det.n_games}`],
+    ['第几步', det.move],
+    ['轮次', det.trick],
+    ['步速', (det.moves_per_sec || 0).toFixed(2) + '/s'],
+    ['上一步', Math.round(det.last_move_ms || 0) + 'ms'],
+    ['平均步', Math.round(det.avg_move_ms || 0) + 'ms'],
+  ].map(([k, v]) => `<div class="stat-card"><div class="sc-k">${k}</div><div class="sc-v">${v}</div></div>`).join('');
+  let scoreBlocks = '';
+  if ((det.scores || []).length) {
+    scoreBlocks = '<div class="score-row">' + det.scores.map(s =>
+      `<div class="gblock ${s === 0 ? 'wA' : s === 1 ? 'wB' : s === -2 ? 'wRun' : 'wErr'}"></div>`).join('') + '</div>';
+  }
+  return `<div class="job-running">
+    ${progressHead(d.progress,
+      `局 ${det.game}/${det.n_games} · 第 ${det.move} 步 · 最新：${lastAct}`, scoreBlocks)}
+    <div class="stat-row">${stats}</div>
+    <h3>手牌余量</h3>${seats}
+    <h3>思考时间（速度去哪了）</h3>
+    <div class="duel-bar">
+      <div class="duel-a" style="width:${pctA}%">${aName} ${fmtMs(tA)}</div>
+      <div class="duel-b" style="flex:1">${bName} ${fmtMs(tB)}</div>
+    </div>
+    <h3>最近 ${MAX_SPARK} 步耗时</h3>
+    <div class="spark">${spark || '<span class="emp">采样中…</span>'}</div>
+  </div>`;
+}
+
+function renderRRLive(d, det) {
+  // The sub-match detail (game/hand_sizes/...) renders as the "current match"
+  // panel; hide its own progress header since the RR header already has one.
+  const inner = det.hand_sizes
+    ? renderMatchLive({ progress: d.progress }, det).replace(/^[\s\S]*?<div class="stat-row">/, '<div class="stat-row">')
+    : '';
+  const rank = (det.elo || []).map((e, i) =>
+    `<tr><td>${i + 1}</td><td>${escapeHtml(e.label)}</td><td>${e.rating}</td></tr>`).join('');
+  return `<div class="job-running">
+    ${progressHead(d.progress, `对局 ${det.rr_done + 1}/${det.rr_total} · ${escapeHtml(det.rr_pair)}`)}
+    <h3>当前对阵</h3>${inner || '<div class="emp">等待首局…</div>'}
+    <h3>实时 Elo</h3><table class="ev"><tr><th>#</th><th>模型</th><th>Elo</th></tr>${rank}</table>
+  </div>`;
+}
+
+function renderBenchLive(d, det) {
+  const sum = det.partial_summary || [];
+  const board = sum.length
+    ? '<table class="ev"><tr><th>模型</th><th>准确率</th><th>正确/总数</th><th>平均</th></tr>'
+      + sum.map(s => `<tr><td>${escapeHtml(s.model_name)}</td>
+        <td class="${s.accuracy >= 80 ? 'ok' : s.accuracy >= 50 ? '' : 'bad'}">${s.accuracy}%</td>
+        <td>${s.correct}/${s.total}</td><td>${s.avg_ms}ms</td></tr>`).join('') + '</table>'
+    : '<div class="emp">等待首个场景完成…</div>';
+  // Matrix cells light up as results land
+  const matrix = (det.matrix || []).map(cell => {
+    const [ok, err] = cell;
+    const cls = err ? 'mx-err' : ok ? 'mx-ok' : 'mx-bad';
+    const ch = err ? '!' : ok ? '✓' : '✗';
+    return `<div class="mx-cell ${cls}">${ch}</div>`;
+  }).join('');
+  return `<div class="job-running">
+    ${progressHead(d.progress,
+      `场景 ${det.si}/${det.n_scenarios} · ${escapeHtml(det.scenario_name || '')} · 模型 ${det.mi}/${det.n_models} · ${escapeHtml(det.model_name || '')}`,
+      `<div class="bench-last">上一判定：<span class="${det.last_correct ? 'ok' : 'bad'}">${det.last_correct ? '正确 ✓' : '错误 ✗'}</span> · ${Math.round(det.last_ms || 0)}ms</div>`)}
+    <h3>实时排行榜</h3>${board}
+    <h3>逐格点亮</h3><div class="mx-grid">${matrix}</div>
+  </div>`;
+}
+
+function renderGenLive(d, det) {
+  const total = (det.solved || 0) + (det.skipped || 0);
+  const solvedPct = total ? Math.round((det.solved / total) * 100) : 0;
+  return `<div class="job-running">
+    ${progressHead(d.progress, `已生成 ${det.solved}/${det.of_n}（跳过 ${det.skipped}）`)}
+    <div class="dual-bar">
+      <div class="dual-solved" style="width:${solvedPct}%">求解成功 ${det.solved}</div>
+      <div class="dual-skipped" style="flex:1">跳过 ${det.skipped}</div>
+    </div>
+    <div class="job-eta">共尝试 ${det.attempts || 0} 次 · 精确解标注较慢，属正常现象</div>
+  </div>`;
+}
+
+const MAX_SPARK = 60;
+
+function fmtMs(ms) {
+  if (ms >= 60000) return Math.floor(ms / 60000) + 'm' + Math.round((ms % 60000) / 1000) + 's';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return Math.round(ms) + 'ms';
 }
 
 function computeEta(p) {
