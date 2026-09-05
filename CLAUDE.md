@@ -26,6 +26,7 @@ pytest tests/test_llm_agent.py -v      # run LLM-specific tests
 Game Engine (game.py)       — round/trick loop, ThreadPoolExecutor timeout
   ├─ GameState (dataclass)  — full snapshot: hands, table, played, finished
   ├─ RulesEngine            — play validation gate
+  ├─ tribute.py             — 进贡/还贡/抗贡 (post-round tribute flow)
   └─ TableState              — per-trick state (current combo, pass count, history)
 
 AI System (guandan/ai/)     — layered, pluggable via registry + config.json
@@ -94,6 +95,7 @@ Tests use `Card.from_id(n)` to construct hands. Mock external services (HTTP) in
 | `/api/pass` | POST | Human passes |
 | `/api/start_game`, `/api/new_game` | POST | Game lifecycle |
 | `/api/new_round` | POST | Start next round |
+| `/api/tribute_return` | POST | Human 还贡 (return one card to the tribute payer) |
 | `/api/hint` | GET | Quick play suggestion |
 | `/api/suggest` | GET | Full AI suggestion with win rates |
 | `/api/evaluate` | POST | MC evaluation of selected cards |
