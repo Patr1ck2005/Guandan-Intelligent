@@ -169,13 +169,19 @@ def plan_tribute(positions: List[int], team_levels: List[int],
     return plan
 
 
-def execute_tribute(hands: Hands, plan: TributePlan,
-                    level: int) -> Tuple[Hands, TributePlan]:
+def execute_tribute(hands: Hands, plan: TributePlan, level: int,
+                    defer_return_for: Optional[int] = None) -> Tuple[Hands, TributePlan]:
     """Perform the tribute exchange on the dealt hands. Deterministic.
 
     Step 1: each payer hands over their largest non-级牌 card.
     Step 2: each receiver returns their smallest card back to that payer.
     Step 3: 先出权 — 单下 payer leads; 双下 → larger tribute's payer leads.
+
+    Args:
+        defer_return_for: player id whose receiver-side return is deferred
+            (human 还贡 via UI). The tribute card still lands in their hand;
+            the exchange's ``returned_card`` stays None until the UI submits
+            the chosen card.
 
     On 抗贡 (``plan.anti_tribute``) hands are returned unchanged.
     """
@@ -201,6 +207,8 @@ def execute_tribute(hands: Hands, plan: TributePlan,
     for ex in plan.exchanges:
         if ex.paid_card is None:
             continue
+        if defer_return_for is not None and ex.receiver == defer_return_for:
+            continue  # human will pick the return card in the UI
         ret = smallest_return_card(hands_list[ex.receiver], level)
         if ret is None:
             continue

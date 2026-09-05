@@ -17,6 +17,7 @@ from .score import RoundResult, advance_level, calculate_result, is_game_won
 from .logging import game_logger
 from .state_utils import next_active_player
 from .table import TableState
+from .tribute import plan_tribute, execute_tribute
 
 
 @dataclass
@@ -26,6 +27,7 @@ class GameResult:
     final_levels: Tuple[int, int]
     rounds_played: int
     round_results: List[RoundResult] = field(default_factory=list)
+    tribute_records: List[dict] = field(default_factory=list)
 
 
 class Game:
@@ -45,6 +47,7 @@ class Game:
         self.state: Optional[GameState] = None
         self.team_levels = [level, level]  # [team_0, team_1]
         self.round_results: List[RoundResult] = []
+        self.tribute_records: List[dict] = []  # per-round tribute exchange logs
         self.round_number = 0
 
     def play_game(self) -> GameResult:
@@ -54,9 +57,11 @@ class Game:
         """
         game_logger.game("game_start", level=self.team_levels[0])
         try:
+            hint = None
             while True:
-                round_result = self._play_round()
+                round_result = self._play_round(starter_hint=hint)
                 self.round_results.append(round_result)
+                hint = round_result.positions[0]  # 头游 leads the next round
 
                 winning_team = round_result.winning_team
 
@@ -70,6 +75,7 @@ class Game:
                         final_levels=(self.team_levels[0], self.team_levels[1]),
                         rounds_played=self.round_number,
                         round_results=self.round_results,
+                        tribute_records=self.tribute_records,
                     )
 
                 self.team_levels[winning_team] = advance_level(
@@ -79,21 +85,54 @@ class Game:
             game_logger.warning("game_error", error=str(Exception))
             raise
 
-    def _play_round(self) -> RoundResult:
-        """Play one round (one hand)."""
+    def _play_round(self, starter_hint: Optional[int] = None) -> RoundResult:
+        """Play one round (one hand).
+
+        级牌归属: the round's level is the 头游 team's level (previous round's
+        winner leads both the level and the first trick). Tribute is planned
+        and executed after dealing, before the first trick.
+        """
         self.round_number += 1
-        level = self.team_levels[0]  # Both teams share the current level for play
+        # 级牌 = 头游队伍的级别 (round 1: both teams share the base level)
+        if starter_hint is not None and self.round_number > 1:
+            level = self.team_levels[constants.TEAMS[starter_hint]]
+        else:
+            level = self.team_levels[0]
         self.rules = RulesEngine(level)
 
         # Deal
         deck = Deck.shuffle(Deck.create())
         hands = Deck.deal(deck)
 
-        # Determine starter: first round = random, subsequent = previous 头游
-        if self.round_number == 1:
+        # Determine starter & tribute.
+        tribute_plan = None
+        if self.round_number == 1 or starter_hint is None:
             starter = random.randint(0, 3)
         else:
-            starter = self.round_results[-1].positions[0]
+            # Tribute for the upcoming round: the previous round's finish
+            # order decides payers/receivers; 抗贡 needs the dealt hands.
+            prev = self.round_results[-1]
+            next_level = self.team_levels[constants.TEAMS[prev.positions[0]]]
+            tribute_plan = plan_tribute(prev.positions, self.team_levels,
+                                        next_level, hands=hands)
+            if tribute_plan.anti_tribute:
+                starter = tribute_plan.leader  # 抗贡 → 头游先出
+            else:
+                hands, tribute_plan = execute_tribute(hands, tribute_plan, level)
+                starter = tribute_plan.leader
+            self.tribute_records.append(tribute_plan.to_dict())
+            if tribute_plan.exchanges:
+                game_logger.game(
+                    "tribute", round=self.round_number,
+                    exchanges=[
+                        {"payer": e.payer, "receiver": e.receiver,
+                         "paid": e.paid_card.display if e.paid_card else None,
+                         "returned": e.returned_card.display if e.returned_card else None}
+                        for e in tribute_plan.exchanges],
+                    anti=tribute_plan.anti_tribute, leader=tribute_plan.leader)
+            elif tribute_plan.anti_tribute:
+                game_logger.game("tribute_anti", round=self.round_number,
+                                 leader=tribute_plan.leader)
 
         self.state = GameState(
             level=level,
@@ -104,7 +143,9 @@ class Game:
         )
 
         game_logger.game("round_start", round=self.round_number,
-                         level=level, starter=starter)
+                         level=level, starter=starter,
+                         tribute="anti" if (tribute_plan and tribute_plan.anti_tribute)
+                         else ("yes" if (tribute_plan and tribute_plan.exchanges) else "no"))
 
         # Play tricks until 3 players empty their hands
         round_iters = 0
