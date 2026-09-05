@@ -11,6 +11,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Dict, List, Optional, Tuple
 
+from .. import constants
 from ..card import Card
 from ..combo import Combo
 from ..combo_finder import ComboFinder
@@ -22,6 +23,9 @@ from ..score import calculate_result, advance_level, is_game_won
 from ..logging import game_logger
 from ..state_utils import apply_play, start_new_trick, next_active_player
 from ..table import TableState
+from ..tribute import plan_tribute, execute_tribute
+
+_PLAYER_NAMES = ["你", "AI-右", "AI-对", "AI-左"]
 
 
 _DECIDER_ICONS = {
@@ -54,6 +58,10 @@ class InteractiveGame:
         self._ai_running = False
         # Accumulated trick history across tricks within a round
         self._acc_trick_history: list = []
+        # Tribute (进贡/还贡/抗贡) state
+        self._tribute_records: list = []       # per-round exchange logs
+        self._pending_return = None            # TributeExchange awaiting human 还贡
+        self._tribute_banner = ""              # one-round banner text
         # AI config
         from ..ai.registry import DEFAULT_CONFIG
         import copy
@@ -80,6 +88,8 @@ class InteractiveGame:
         """Human plays the given cards."""
         if self._game_over:
             return self._build_state()
+        if self._pending_return is not None:
+            return self._build_state(error="请先完成还贡")
         if not self._game_started:
             return self._build_state(error="请先点击「开始游戏」")
         if self._ai_running:
@@ -99,6 +109,8 @@ class InteractiveGame:
         """Human passes. Returns updated state. Async AI processing."""
         if self._game_over:
             return self._build_state()
+        if self._pending_return is not None:
+            return self._build_state(error="请先完成还贡")
         if self._ai_running:
             return self._build_state(error="AI思考中，请等待")
         if not self._is_human_turn():
@@ -119,6 +131,37 @@ class InteractiveGame:
                 self._ai_running = True
         return self._build_state()
 
+    def submit_tribute_return(self, card_ids: List[int]) -> dict:
+        """Human (as tribute receiver) returns the selected card."""
+        if self._pending_return is None:
+            return self._build_state(error="当前没有待还贡的牌")
+        ex = self._pending_return
+        if ex.receiver != self.HUMAN_ID:
+            self._pending_return = None
+            return self._build_state(error="你不是收贡方")
+        hand = self.state.hands[self.HUMAN_ID]
+        cards = [c for c in hand if c.id in card_ids]
+        if len(cards) != 1:
+            return self._build_state(error="请选择恰好一张牌还贡")
+        card = cards[0]
+        # Apply the deferred exchange: receiver loses `card`, payer regains
+        # it. The tribute card already landed in the human's hand.
+        hands_list = [tuple(h) for h in self.state.hands]
+        hands_list[self.HUMAN_ID] = tuple(
+            c for c in hands_list[self.HUMAN_ID] if c.id != card.id)
+        hands_list[ex.payer] = hands_list[ex.payer] + (card,)
+        self.state.hands = tuple(hands_list)
+        ex.returned_card = card
+        self._pending_return = None
+        self._tribute_banner = (
+            f"AI 进贡 {ex.paid_card.display}，你还贡 {card.display}")
+        # Refresh the round's tribute record with the resolved return card.
+        if self._tribute_records and \
+                self._tribute_records[-1]["round"] == self.round_number:
+            self._tribute_records[-1]["exchanges"] = [
+                e.to_dict() for e in self._round_tribute_plan.exchanges]
+        return self._start_round_after_tribute()
+
     def get_state(self) -> dict:
         """Return current game state. If AI is running, process one AI turn."""
         if self._ai_running and self.state is not None:
@@ -129,6 +172,8 @@ class InteractiveGame:
         """Check if it's currently the human's turn."""
         if self.state is None:
             return False
+        if self._pending_return is not None:
+            return False  # must resolve the tribute return first
         if len(self.state.finished_positions) >= 3:
             return False
         if self._ai_running:
@@ -142,18 +187,61 @@ class InteractiveGame:
 
     def _start_round(self) -> dict:
         self.round_number += 1
-        round_level = self.team_levels[0]  # level for card play is shared
-        self.rules = RulesEngine(round_level)
         self._acc_trick_history = []  # reset accumulated history for new round
 
         deck = Deck.shuffle(Deck.create())
         hands = Deck.deal(deck)
 
-        if self.round_number == 1:
+        tribute_plan = None
+        first_round = self.round_number == 1 or not self._round_results
+        if first_round:
             starter = random.randint(0, 3)
+            round_level = self.team_levels[0]
         else:
-            starter = self._round_results[-1].positions[0] if self._round_results else 0
+            prev = self._round_results[-1]
+            leader_team = constants.TEAMS[prev.positions[0]]
+            # 级牌 = 头游队伍的级别
+            round_level = self.team_levels[leader_team]
+            tribute_plan = plan_tribute(prev.positions, self.team_levels,
+                                        round_level, hands=hands)
+            if tribute_plan.anti_tribute:
+                starter = tribute_plan.leader  # 头游先出
+                self._tribute_banner = "进贡方持双王，抗贡！头游先出"
+                self._tribute_records.append({
+                    "round": self.round_number, "anti_tribute": True,
+                    "leader": starter, "exchanges": []})
+            else:
+                # Defer the human's return only in interactive mode; with
+                # auto-play the human slot is AI-driven end-to-end.
+                human_is_receiver = (not self._auto_play) and any(
+                    ex.receiver == self.HUMAN_ID for ex in tribute_plan.exchanges)
+                hands, tribute_plan = execute_tribute(
+                    hands, tribute_plan, round_level,
+                    defer_return_for=self.HUMAN_ID if human_is_receiver else None)
+                starter = tribute_plan.leader
+                human_ex = None
+                for ex in tribute_plan.exchanges:
+                    if ex.payer == self.HUMAN_ID:
+                        self._tribute_banner = (
+                            f"你进贡 {ex.paid_card.display}"
+                            f"（{_PLAYER_NAMES[ex.receiver]} 收贡）")
+                    elif ex.receiver == self.HUMAN_ID:
+                        human_ex = ex
+                if human_ex is not None:
+                    self._pending_return = human_ex
+                    self._tribute_banner = (
+                        f"AI 进贡 {human_ex.paid_card.display}，请选一张牌还贡")
+                elif len(tribute_plan.exchanges) > 1:
+                    self._tribute_banner = " · ".join(
+                        f"{_PLAYER_NAMES[e.payer]} 进贡 {e.paid_card.display}"
+                        for e in tribute_plan.exchanges)
+                self._tribute_records.append({
+                    "round": self.round_number, "anti_tribute": False,
+                    "leader": starter,
+                    "exchanges": [e.to_dict() for e in tribute_plan.exchanges]})
+            self._round_tribute_plan = tribute_plan
 
+        self.rules = RulesEngine(round_level)
         from ..ai.action_log import ActionLog
         self.action_log = ActionLog()
         self.state = GameState(
@@ -169,6 +257,13 @@ class InteractiveGame:
         self._ai_running = False
         self._auto_human_pending = False
         self._message = "点击「开始游戏」" if not self._game_started else ""
+        return self._build_state()
+
+    def _start_round_after_tribute(self) -> dict:
+        """After the human's 还贡, hands already reflect the exchange.
+        Just clear pending state and return the updated view."""
+        self._pending_return = None
+        self._message = ""
         return self._build_state()
 
     # ------------------------------------------------------------------
@@ -452,7 +547,9 @@ class InteractiveGame:
         schema = get_schema()
         decider_cat = schema.get("decider", {}).get("models", {})
 
-        player_cfg = self.config.get("players", {}).get(str(player_id), {})
+        player_cfg = self.config.get("players", {}).get(player_id)
+        if player_cfg is None:
+            player_cfg = self.config.get("players", {}).get(str(player_id), {})
         decider_id = player_cfg.get("decider")
         if not decider_id:
             decider_id = self.config.get("decider", {}).get("default_model", "mc")
@@ -503,6 +600,12 @@ class InteractiveGame:
                 "team_level_1": self.team_levels[1],
                 "round_results": [],
                 "trick_history": [],
+                "tribute": {
+                    "banner": "",
+                    "pending_return": False,
+                    "pending_return_card": None,
+                    "records": [],
+                },
                 "game_started": self._game_started,
                 "human_win_rate": None,
             }
@@ -555,6 +658,8 @@ class InteractiveGame:
         # Determine message
         if error:
             msg = error
+        elif self._pending_return is not None:
+            msg = "请选一张牌还贡"
         elif message:
             msg = message
         elif self._ai_running:
@@ -597,13 +702,24 @@ class InteractiveGame:
                 "level_change": rr.level_change,
             })
 
+        # Tribute info (进贡/还贡/抗贡)
+        pending_return_card = None
+        if self._pending_return is not None and self._pending_return.paid_card:
+            pending_return_card = self._card_json(self._pending_return.paid_card)
+        tribute_block = {
+            "banner": self._tribute_banner,
+            "pending_return": self._pending_return is not None,
+            "pending_return_card": pending_return_card,
+            "records": self._tribute_records[-3:],  # last few rounds
+        }
+
         return {
             "my_hand": [self._card_json(c) for c in hand],
             "table_combo": table_combo,
             "players": players,
             "my_turn": my_turn,
             "can_pass": can_pass,
-            "level": self.team_levels[0] if self.team_levels else self.level,
+            "level": self.state.level,
             "round": self.round_number,
             "trick": self.state.trick_number,
             "finished_positions": finished_positions,
@@ -616,6 +732,7 @@ class InteractiveGame:
             "team_level_1": self.team_levels[1],
             "round_results": round_results,
             "trick_history": trick_history,
+            "tribute": tribute_block,
             "ai_running": self._ai_running,
             "ai_thinking_player": (
                 self.HUMAN_ID if self._auto_human_pending

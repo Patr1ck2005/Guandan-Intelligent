@@ -66,15 +66,7 @@ def _get_game() -> InteractiveGame:
     sid = uuid.uuid4().hex
     session["game_id"] = sid
     game = InteractiveGame(level=2)
-    # Load saved config if available
-    try:
-        if _CONFIG_PATH.exists():
-            saved = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-            _normalize_config(saved)
-            game.config.update(saved)
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
-
+    _load_saved_config(game)
     _games[sid] = (game, time.time())
     return game
 
@@ -84,6 +76,17 @@ def _normalize_config(config: dict):
     players = config.get("players")
     if isinstance(players, dict):
         config["players"] = {int(k): v for k, v in players.items()}
+
+
+def _load_saved_config(game) -> None:
+    """Apply the on-disk saved config to a freshly created game."""
+    try:
+        if _CONFIG_PATH.exists():
+            saved = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            _normalize_config(saved)
+            game.config.update(saved)
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
 
 
 # ==================================================================
@@ -157,11 +160,22 @@ def api_start_game():
     return jsonify(result)
 
 
+@app.route("/api/tribute_return", methods=["POST"])
+def api_tribute_return():
+    """Human (as tribute receiver) submits the card to return (还贡)."""
+    game = _get_game()
+    data = request.get_json() or {}
+    card_ids = data.get("card_ids", [])
+    result = game.submit_tribute_return(card_ids)
+    return jsonify(result)
+
+
 @app.route("/api/new_game", methods=["POST"])
 def api_new_game():
     sid = uuid.uuid4().hex
     session["game_id"] = sid
     game = InteractiveGame(level=2)
+    _load_saved_config(game)
     _games[sid] = (game, time.time())
     game.start_new_round()
     return jsonify(game.get_state())

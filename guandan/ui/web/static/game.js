@@ -265,6 +265,7 @@ function render() {
   const msgEl = document.getElementById('message');
   msgEl.textContent = gameState.message || '';
   msgEl.className = gameState.error ? 'error' : '';
+  renderTribute(gameState.tribute);
   if (gameState.message === 'AI思考中...' || gameState.ai_running) {
     msgEl.classList.add('thinking');
     document.getElementById('btn-play').disabled = true;
@@ -277,8 +278,60 @@ function render() {
   renderHistory(gameState.round_results || []);
 }
 
-function renderDeciderBadge(p, decider) {
-  const el = document.getElementById('decider-' + p);
+// ==================================================================
+// Tribute (进贡/还贡/抗贡)
+// ==================================================================
+
+function renderTribute(tribute) {
+  const el = document.getElementById('tribute-banner');
+  if (!el) return;
+  if (!tribute || (!tribute.banner && !tribute.pending_return)) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = 'block';
+  let html = '';
+  if (tribute.pending_return) {
+    html = '<div style="background:#8e44ad;color:#fff;padding:6px 12px;border-radius:6px;'
+        + 'font-size:0.9em;margin-bottom:4px">👑 '
+        + escapeHtml2(tribute.banner || '请选一张牌还贡')
+        + ' — 选中一张牌后点「还贡」</div>';
+    // Show a confirm button; requires exactly one selected card
+    html += '<button id="btn-tribute-return" onclick="submitTributeReturn()" '
+         + 'style="background:#8e44ad;color:#fff;border:none;padding:6px 16px;'
+         + 'border-radius:6px;cursor:pointer;margin-bottom:6px">还贡</button>';
+  } else if (tribute.banner) {
+    html = '<div style="background:#2c3e50;color:#f1c40f;padding:4px 12px;'
+        + 'border-radius:6px;font-size:0.85em;margin-bottom:4px">👑 '
+        + escapeHtml2(tribute.banner) + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+async function submitTributeReturn() {
+  const t = gameState && gameState.tribute;
+  if (!t || !t.pending_return) return;
+  if (selectedCards.size !== 1) {
+    const msgEl = document.getElementById('message');
+    msgEl.textContent = '还贡需要恰好选中一张牌';
+    msgEl.className = 'error';
+    return;
+  }
+  const ids = Array.from(selectedCards);
+  gameState = await gameApi.tributeReturn(ids);
+  selectedCards.clear();
+  activeStrip = null;
+  render();
+  if (debugMode) fetchDebug();
+}
+
+function escapeHtml2(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function renderDeciderBadge(p, decider) {  const el = document.getElementById('decider-' + p);
   if (!el) return;
   // Human player always shows '你'
   if (p === 0) {

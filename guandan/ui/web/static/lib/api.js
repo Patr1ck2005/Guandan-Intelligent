@@ -46,6 +46,7 @@ window.gameApi = {
   startGame:     function()     { return _apiRequest('/api/start_game', { method: 'POST' }); },
   newGame:       function()     { return _apiRequest('/api/new_game', { method: 'POST' }); },
   newRound:      function()     { return _apiRequest('/api/new_round', { method: 'POST' }); },
+  tributeReturn: function(ids)  { return _apiRequest('/api/tribute_return', { method: 'POST', body: { card_ids: ids } }); },
   getHint:       function()     { return _apiRequest('/api/hint'); },
   getDebug:      function()     { return _apiRequest('/api/debug'); },
   getAILog:      function()     { return _apiRequest('/api/ai_log'); },
