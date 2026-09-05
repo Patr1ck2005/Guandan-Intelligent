@@ -44,9 +44,65 @@ class BaseAgent:
         raise NotImplementedError
 
 
+def _enumerate_straight_flush_responses(hand: Tuple[Card, ...], table_combo: Combo,
+                                        parser: ComboParser, level: int) -> List[Combo]:
+    """The best SF strictly beating the table SF, capped to one candidate.
+
+    Capped on purpose: MC/ISMCTS simulate every candidate; SF responses are
+    rare and one option (highest end rank) is decision-sufficient.
+    """
+    return _sf_candidates_above(hand, table_combo, parser, level)[:1]
+
+
+def _sf_candidates_above(hand: Tuple[Card, ...], table_combo: Combo,
+                         parser: ComboParser, level: int) -> List[Combo]:
+    """All straight flushes (any suit) strictly above table_combo, best first."""
+    from ..card import Suit
+    suits = (Suit.CLUBS, Suit.DIAMONDS, Suit.HEARTS, Suit.SPADES)
+    length = table_combo.length
+    t_eff = effective_rank(table_combo.main_rank, level)
+    normals = [c for c in hand if not c.is_wild(level)]
+    wilds = [c for c in hand if c.is_wild(level)]
+    wild_count = len(wilds)
+
+    results = []
+    for suit in suits:
+        for end in range(3 + length - 1, 15):
+            start = end - length + 1
+            if start < 3 or end <= table_combo.main_rank.value:
+                continue
+            subset = []
+            missing = 0
+            ok = True
+            for rv in range(start, end + 1):
+                matches = [c for c in normals
+                           if c.rank.value == rv and c.suit == suit]
+                if matches:
+                    subset.append(matches[0])
+                elif suit == Suit.HEARTS and missing < wild_count:
+                    missing += 1  # wild (always hearts) fills the gap
+                else:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            parsed = parser.parse(subset + wilds[:missing])
+            if parsed and parsed.combo_type == ComboType.STRAIGHT_FLUSH:
+                if effective_rank(parsed.main_rank, level) > t_eff:
+                    results.append(parsed)
+    results.sort(key=lambda c: effective_rank(c.main_rank, level), reverse=True)
+    return results
+
+
 def _enumerate_responses(hand: Tuple[Card, ...], table_combo: Combo,
                          finder: ComboFinder, level: int) -> List[Combo]:
-    """Enumerate ALL valid same-type responses + bomb option."""
+    """Enumerate ALL valid same-type responses + bomb option (+ SF options).
+
+    Rule fidelity (江苏竞赛规则): a straight flush beats ALL normal bombs
+    and every non-bomb combo, so SF candidates are appended for ANY table
+    combo below SF. When the table combo IS a straight flush, only higher
+    SFs are legal (rockets are validated by can_beat at play time).
+    """
     from ..combo_parser import ComboParser
     parser = ComboParser(level)
     candidates = []
@@ -54,7 +110,10 @@ def _enumerate_responses(hand: Tuple[Card, ...], table_combo: Combo,
     wilds = [c for c in hand if c.is_wild(level)]
     normals = [c for c in hand if not c.is_wild(level)]
 
-    if ct.name == 'SINGLE':
+    if ct == ComboType.STRAIGHT_FLUSH:
+        candidates.extend(_enumerate_straight_flush_responses(
+            hand, table_combo, parser, level))
+    elif ct.name == 'SINGLE':
         t_eff = effective_rank(table_combo.main_rank, level)
         count = 0
         for c in sorted(hand, key=lambda x: effective_rank(x.rank, level)):
@@ -154,11 +213,66 @@ def _enumerate_responses(hand: Tuple[Card, ...], table_combo: Combo,
         resp = finder.pick_response(table_combo)
         if resp: candidates.append(resp)
 
+    # Straight flush beats every normal bomb and every non-bomb combo — add
+    # SF candidates whenever the table combo is below SF (SF/rocket excluded).
+    # SF outranks any single/bomb rank, so every found SF is legal here.
+    if ct != ComboType.STRAIGHT_FLUSH and ct != ComboType.ROCKET:
+        candidates.extend(_find_straight_flush_leads(hand, parser, level))
+
     # Add bomb (must be able to beat the table combo)
     bomb = finder._find_any_bomb()
     if bomb and can_beat(bomb, table_combo):
         candidates.append(bomb)
     return candidates
+
+
+def _find_straight_flush_leads(hand: Tuple[Card, ...], parser: ComboParser,
+                               level: int) -> List[Combo]:
+    """Find the single best straight flush in hand (highest effective rank).
+
+    Capped to one candidate on purpose: MC/ISMCTS simulate every candidate,
+    and enumerating all SF windows (up to ~15) blows the decision time budget.
+    One SF option is decision-sufficient — SF outranks everything below it,
+    and the highest end is the hardest for opponents to top.
+    """
+    from ..card import Suit
+    normals = [c for c in hand if not c.is_wild(level)]
+    wilds = [c for c in hand if c.is_wild(level)]
+    by_suit: dict = {}
+    for c in normals:
+        if c.rank not in (Rank.TWO, Rank.SMALL_JOKER, Rank.BIG_JOKER):
+            by_suit.setdefault(c.suit, set()).add(c.rank.value)
+
+    wild_count = len(wilds)
+    best = None
+    best_eff = -1
+
+    for suit, ranks_present in by_suit.items():
+        if len(ranks_present) + wild_count < 5:
+            continue
+        for start in range(3, 11):  # 5-run: start 3..10, end <= 14
+            end = start + 4
+            window = set(range(start, end + 1))
+            present = window & ranks_present
+            missing = 5 - len(present)
+            if missing > wild_count:
+                continue
+            subset = []
+            for rv in sorted(window):
+                matches = [c for c in normals
+                           if c.rank.value == rv and c.suit == suit]
+                if matches:
+                    subset.append(matches[0])
+            needed = 5 - len(subset)
+            if needed > wild_count:
+                continue
+            parsed = parser.parse(subset + wilds[:needed])
+            if parsed and parsed.combo_type == ComboType.STRAIGHT_FLUSH:
+                from ..card import effective_rank as _eff
+                eff = _eff(parsed.main_rank, level)
+                if eff > best_eff:
+                    best, best_eff = parsed, eff
+    return [best] if best else []
 
 
 def _generate_lead_candidates(finder: ComboFinder, hand: Tuple[Card, ...]) -> List[Combo]:

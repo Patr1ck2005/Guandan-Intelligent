@@ -327,10 +327,13 @@ class TestLLMAnalyze:
 
         monkeypatch.setattr(agent._client, "chat", fake_chat)
 
-        # P1 led SINGLE ♣A; at level 2, P0 (♣3..♣7, no level-card/2, no bomb)
-        # has no single higher than A → no candidates
+        # P1 led SINGLE ♣A (id 12); P0 holds ♣3 ♣4 ♣5 ♣6 ♣7 — every single
+        # is below A, no bomb in hand. At level 2 all suit runs are legal SFs
+        # that beat a single, so use off-suit mixed cards with no 5-run in
+        # one suit and no 4-of-a-kind: ♣3 ♥4 ♦5 ♠6 ♣9.
         table_combo = ComboParser(2).parse([Card.from_id(12)])
-        view = make_view([1, 2, 3, 4, 5], table_combo=table_combo, table_player=1)
+        view = make_view([1, 17, 31, 45, 9], table_combo=table_combo,
+                         table_player=1)
         result = agent.analyze(view)
 
         assert called["n"] == 0

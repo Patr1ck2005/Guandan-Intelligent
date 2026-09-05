@@ -224,6 +224,26 @@ def test_parser_straight_flush():
     print("  PASS test_parser_straight_flush")
 
 
+def test_finder_response_to_sf_returns_legal_type():
+    """pick_response on an SF target must return a higher SF — never a plain
+    straight (that was the masked-coercion bug)."""
+    from guandan.combo_finder import ComboFinder
+    target = _sf(Suit.CLUBS, 3)  # C3-C7 on the table
+    # Hand: higher hearts SF H5-H9 + junk
+    hand_ids = []
+    for rv in range(5, 10):
+        hand_ids.append(_find_cards(Rank(rv), suit=Suit.HEARTS, count=1)[0])
+    hand_ids += _find_cards(Rank.TWO, count=3)  # junk (2s can't join straights)
+    hand = tuple(_cards(hand_ids))
+    finder = ComboFinder(hand, 2)
+    resp = finder.pick_response(target)
+    assert resp is not None
+    assert resp.combo_type == ComboType.STRAIGHT_FLUSH, \
+        f"Expected SF response, got {resp.combo_type.name}"
+    assert resp.main_rank.value > target.main_rank.value
+    print("  PASS test_finder_response_to_sf_returns_legal_type")
+
+
 def test_parser_invalid():
     parser = ComboParser(level=2)
     # Different ranks without valid combo
@@ -282,6 +302,88 @@ def test_compare_different_nonbomb():
     assert not can_beat(single, pair)  # different non-bomb types can't beat
     assert not can_beat(pair, single)
     print("  PASS test_compare_different_nonbomb")
+
+
+# ---------------------------------------------------------------------------
+# Straight flush hierarchy tests (江苏竞赛规则: 王炸＞同花顺＞炸弹＞一般牌型)
+# ---------------------------------------------------------------------------
+
+def _sf(suit: Suit, start_rank: int) -> Combo:
+    """Build a 5-card same-suit run starting at start_rank."""
+    parser = ComboParser(level=2)
+    ids = []
+    for rv in range(start_rank, start_rank + 5):
+        ids.append(_find_cards(Rank(rv), suit=suit, count=1)[0])
+    return parser.parse(_cards(ids))
+
+
+def test_sf_beats_normal_bomb():
+    """同花顺 beats ALL normal bombs regardless of bomb size/rank."""
+    parser = ComboParser(level=2)
+    sf = _sf(Suit.CLUBS, 3)  # C3-C7 straight flush
+    bomb8_k = parser.parse(_cards(_find_cards(Rank.K, count=8)))  # 8-card bomb
+    bomb4_a = parser.parse(_cards(_find_cards(Rank.A, count=4)))
+    assert can_beat(sf, bomb8_k), "SF must beat an 8-card bomb"
+    assert can_beat(sf, bomb4_a), "SF must beat a 4-card bomb"
+    print("  PASS test_sf_beats_normal_bomb")
+
+
+def test_normal_bomb_cannot_beat_sf():
+    parser = ComboParser(level=2)
+    sf = _sf(Suit.CLUBS, 3)
+    bomb4_a = parser.parse(_cards(_find_cards(Rank.A, count=4)))
+    bomb8_3 = parser.parse(_cards(_find_cards(Rank.THREE, count=8)))
+    assert not can_beat(bomb4_a, sf)
+    assert not can_beat(bomb8_3, sf)
+    print("  PASS test_normal_bomb_cannot_beat_sf")
+
+
+def test_sf_beats_plain_straight_and_sequences():
+    """SF beats any non-bomb: plain straight (even longer/higher), 连对."""
+    parser = ComboParser(level=2)
+    sf = _sf(Suit.CLUBS, 3)  # C3-C7
+    # longer, higher plain straight 8-K (6 cards, mixed suits → not SF)
+    ids = [_find_cards(Rank(8), suit=Suit.HEARTS, count=1)[0],
+           _find_cards(Rank(9), suit=Suit.DIAMONDS, count=1)[0],
+           _find_cards(Rank(10), suit=Suit.CLUBS, count=1)[0],
+           _find_cards(Rank(11), suit=Suit.SPADES, count=1)[0],
+           _find_cards(Rank(12), suit=Suit.HEARTS, count=1)[0],
+           _find_cards(Rank(13), suit=Suit.DIAMONDS, count=1)[0]]
+    long_straight = parser.parse(_cards(ids))
+    assert long_straight.combo_type == ComboType.STRAIGHT
+    assert long_straight.length == 6
+    assert can_beat(sf, long_straight)
+    # 连对 3-8 (6 pairs) — higher than SF main rank 7
+    cp_ids = []
+    for rv in range(3, 9):
+        cp_ids.extend(_find_cards(Rank(rv), count=2))
+    cp = parser.parse(_cards(cp_ids))
+    assert cp.combo_type == ComboType.CONSECUTIVE_PAIRS
+    assert can_beat(sf, cp)
+    print("  PASS test_sf_beats_plain_straight_and_sequences")
+
+
+def test_sf_vs_sf_higher_rank_wins():
+    sf_3 = _sf(Suit.CLUBS, 3)   # C3-C7
+    sf_5 = _sf(Suit.HEARTS, 5)  # H5-H9
+    assert can_beat(sf_5, sf_3)
+    assert not can_beat(sf_3, sf_5)
+    print("  PASS test_sf_vs_sf_higher_rank_wins")
+
+
+def test_only_rocket_and_higher_sf_beat_sf():
+    parser = ComboParser(level=2)
+    sf = _sf(Suit.CLUBS, 3)
+    bj_all = [i for i in range(108) if _c(i).rank == Rank.BIG_JOKER]
+    sj_all = [i for i in range(108) if _c(i).rank == Rank.SMALL_JOKER]
+    rocket = parser.parse(_cards(bj_all + sj_all))
+    assert can_beat(rocket, sf), "rocket beats SF"
+    assert not can_beat(sf, rocket)
+    # lower SF cannot beat higher SF
+    sf_high = _sf(Suit.SPADES, 8)  # S8-S12(Q)
+    sf_low = _sf(Suit.DIAMONDS, 3)
+    assert not can_beat(sf_low, sf_high)
+    print("  PASS test_only_rocket_and_higher_sf_beat_sf")
 
 
 # ---------------------------------------------------------------------------

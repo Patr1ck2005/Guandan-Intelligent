@@ -292,7 +292,9 @@ def test_endgame_lead_with_straight():
 
 def test_weaker_bomb_cannot_beat_stronger_bomb():
     """Table has KKKK (4-K bomb). Hand has 9999 (4-9 bomb, no wilds).
-    Model must NOT choose 9999 as a candidate — it cannot beat KKKK."""
+    Model must NOT choose 9999 as a candidate — it cannot beat KKKK.
+    (SF candidates ARE expected: 同花顺 beats all normal bombs per
+    江苏竞赛规则 — but every returned response must be legal.)"""
     from guandan.combo_compare import can_beat
     from guandan.ai.agent import _enumerate_responses
 
@@ -326,9 +328,12 @@ def test_weaker_bomb_cannot_beat_stronger_bomb():
                 f"(candidates: {[r.combo_type.name + ' ' + str(r.length) for r in responses]})"
             )
 
-    assert len(responses) == 0, \
-        f"No legal responses expected (9999 cannot beat KKKK), got {len(responses)}"
-    print("  PASS test_weaker_bomb_cannot_beat_stronger_bomb")
+    # Legality invariant: every returned response must beat the table combo
+    for resp in responses:
+        assert can_beat(resp, combo_K), \
+            f"Illegal response {resp} cannot beat {combo_K}"
+    print(f"  PASS test_weaker_bomb_cannot_beat_stronger_bomb "
+          f"({len(responses)} legal responses, 9999 excluded)")
 
 
 def test_larger_bomb_can_beat_smaller_bomb():

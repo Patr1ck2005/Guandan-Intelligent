@@ -406,7 +406,7 @@ def api_suggest():
                     _combo_type_value(c.combo_type), c.combo_type),
                 "cards": c.cards,
                 "length": len(c.card_ids),
-                "is_bomb": c.combo_type in ("NORMAL_BOMB", "STRAIGHT_FLUSH", "ROCKET"),
+                "is_bomb": c.combo_type in ("NORMAL_BOMB", "ROCKET"),
                 "win_rate": c.win_rate or 0,
                 "score": c.score,
             }

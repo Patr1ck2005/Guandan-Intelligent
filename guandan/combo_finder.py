@@ -99,8 +99,8 @@ class ComboFinder:
             return self._beat_triple(table_combo)
         elif ct == ComboType.TRIPLE_PAIR:
             return self._beat_triple_side(table_combo, 2)
-        elif ct in (ComboType.STRAIGHT, ComboType.STRAIGHT_FLUSH):
-            return self._beat_straight(table_combo)
+        elif ct == ComboType.STRAIGHT_FLUSH:
+            return self._beat_straight_flush(table_combo)
         elif ct == ComboType.CONSECUTIVE_PAIRS:
             return self._beat_consecutive_pairs(table_combo)
         elif ct == ComboType.CONSECUTIVE_TRIPLES:
@@ -298,7 +298,50 @@ class ComboFinder:
             return None
         length = target.length
         t_end = target.main_rank.value
+        # Note: the parser cascade resolves a same-suit 5-run as STRAIGHT_FLUSH
+        # before STRAIGHT — legal now that can_beat lets SF beat plain straights.
         return self._find_straight_beating(length, t_end)
+
+    def _beat_straight_flush(self, target: Combo) -> Optional[Combo]:
+        """Respond to a straight flush: a bigger SF of ANY suit.
+
+        Per 江苏竞赛规则: SF beats ALL normal bombs, so bombs are NOT valid
+        responses to an SF — only a higher SF can follow (a rocket in hand is
+        appended by callers via the can_beat-validated bomb path). Wild cards
+        are always hearts, so wild-containing SFs are hearts-suited.
+        """
+        length = target.length  # 5 by parser invariant
+        t_end = target.main_rank.value
+        t_eff = effective_rank(target.main_rank, self.level)
+        best: Optional[Combo] = None
+        best_eff = -1
+        for suit in (Suit.CLUBS, Suit.DIAMONDS, Suit.HEARTS, Suit.SPADES):
+            for end in range(t_end + 1, 15):
+                start = end - length + 1
+                if start < 3:
+                    continue
+                subset = []
+                missing = 0
+                ok = True
+                for r in range(start, end + 1):
+                    r_rank = Rank(r)
+                    matches = [c for c in self.normals
+                               if c.rank == r_rank and c.suit == suit]
+                    if matches:
+                        subset.append(matches[0])
+                    elif suit == Suit.HEARTS and missing < self.wild_count:
+                        missing += 1  # wild (always hearts) fills the gap
+                    else:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                combo = self._parser.parse(subset + self.wilds[:missing])
+                if combo and combo.combo_type == ComboType.STRAIGHT_FLUSH:
+                    eff = effective_rank(combo.main_rank, self.level)
+                    if t_eff < eff <= 15 and eff > best_eff:
+                        best, best_eff = combo, eff
+        return best
 
     def _beat_consecutive_pairs(self, target: Combo) -> Optional[Combo]:
         if effective_rank(target.main_rank, self.level) >= 15:
