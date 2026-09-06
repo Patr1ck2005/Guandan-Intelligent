@@ -854,40 +854,6 @@ class MonteCarloAgent(BaseAgent):
         return InformedAgent()
 
 
-# Module-level helpers (non-duplicated, kept for backward compat until Phase 5)
-
-def _deal_subset(unseen: List[Card], start: int, count: int, counter: CardCounter) -> Tuple[Card, ...]:
-    """Deal a subset of unseen cards, keeping known cards in place."""
-    # This is simplified — in reality we'd need to preserve already-known cards
-    # For now, deal from the unseen pool
-    end = min(start + count, len(unseen))
-    return tuple(unseen[start:end])
-
-
-def _select_diverse_candidates(candidates: List[Combo], limit: int) -> List[Combo]:
-    """Select a diverse subset: include different combo types and sizes."""
-    by_type: dict = {}
-    for c in candidates:
-        t = c.combo_type
-        if t not in by_type:
-            by_type[t] = []
-        by_type[t].append(c)
-
-    result = []
-    # Take up to 3 from each type, prioritizing different main_ranks
-    for t, combos in by_type.items():
-        combos.sort(key=lambda c: c.main_rank)
-        seen_ranks = set()
-        for c in combos:
-            if len(result) >= limit:
-                return result
-            if c.main_rank not in seen_ranks or len(by_type[t]) <= 3:
-                result.append(c)
-                seen_ranks.add(c.main_rank)
-    return result[:limit]
-
-
-# ==================================================================
 # ==================================================================
 # InformedAgent — simulation-only, exploits known opponent hands, no tunable weights
 # ==================================================================

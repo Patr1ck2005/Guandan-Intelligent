@@ -100,6 +100,8 @@ class ComboFinder:
             return self._beat_triple(table_combo)
         elif ct == ComboType.TRIPLE_PAIR:
             return self._beat_triple_side(table_combo, 2)
+        elif ct == ComboType.STRAIGHT:
+            return self._beat_straight(table_combo)
         elif ct == ComboType.STRAIGHT_FLUSH:
             return self._beat_straight_flush(table_combo)
         elif ct == ComboType.CONSECUTIVE_PAIRS:

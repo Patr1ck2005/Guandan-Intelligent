@@ -645,6 +645,67 @@ def test_straight_boundary_boundaries():
     print("  PASS test_straight_boundary_boundaries")
 
 
+def test_pick_response_to_straight_dispatches():
+    """pick_response must dispatch STRAIGHT to _beat_straight (was a silent
+    dispatch gap: agents could only bomb or pass on straight leads)."""
+    parser = ComboParser(level=2)
+
+    def mk(rank, suit, deck=0):
+        for i in range(deck * 54, deck * 54 + 54):
+            c = Card.from_id(i)
+            if c.rank == rank and c.suit == suit:
+                return c
+        raise ValueError((rank, suit, deck))
+
+    # table: 5-9 straight (mixed suits)
+    tbl_ids = [mk(Rank.FIVE, Suit.CLUBS).id, mk(Rank.SIX, Suit.DIAMONDS, 1).id,
+               mk(Rank.SEVEN, Suit.CLUBS).id, mk(Rank.EIGHT, Suit.HEARTS, 1).id,
+               mk(Rank.NINE, Suit.SPADES).id]
+    table_combo = parser.parse(_cards(tbl_ids))
+    assert table_combo is not None and table_combo.combo_type == ComboType.STRAIGHT
+
+    # hand with a bigger straight 10-J-Q-K-A + junk
+    hand_ids = [mk(Rank.TEN, Suit.CLUBS, 1).id, mk(Rank.J, Suit.DIAMONDS).id,
+                mk(Rank.Q, Suit.CLUBS, 1).id, mk(Rank.K, Suit.DIAMONDS, 1).id,
+                mk(Rank.A, Suit.SPADES, 1).id, mk(Rank.THREE, Suit.CLUBS).id]
+    finder = ComboFinder(_cards(hand_ids), level=2)
+    resp = finder.pick_response(table_combo)
+    assert resp is not None, "must find a straight response when one exists"
+    assert resp.combo_type == ComboType.STRAIGHT
+    assert resp.length == 5
+    assert can_beat(resp, table_combo)
+    print(f"  PASS pick_response STRAIGHT dispatch "
+          f"({[c.display for c in resp.cards]})")
+
+
+def test_pick_response_to_straight_falls_back_to_bomb():
+    """No bigger straight in hand → bomb fallback (existing semantics)."""
+    parser = ComboParser(level=2)
+
+    def mk(rank, suit, deck=0):
+        for i in range(deck * 54, deck * 54 + 54):
+            c = Card.from_id(i)
+            if c.rank == rank and c.suit == suit:
+                return c
+        raise ValueError((rank, suit, deck))
+
+    tbl_ids = [mk(Rank.FIVE, Suit.CLUBS).id, mk(Rank.SIX, Suit.DIAMONDS, 1).id,
+               mk(Rank.SEVEN, Suit.CLUBS).id, mk(Rank.EIGHT, Suit.HEARTS, 1).id,
+               mk(Rank.NINE, Suit.SPADES).id]
+    table_combo = parser.parse(_cards(tbl_ids))
+
+    # hand WITHOUT any 5 consecutive ranks, but WITH a bomb
+    bomb_ids = _find_cards(Rank.SIX, count=4)
+    junk = [mk(Rank.TWO, Suit.CLUBS).id, mk(Rank.TWO, Suit.DIAMONDS, 1).id,
+            mk(Rank.K, Suit.CLUBS).id]
+    finder = ComboFinder(_cards(bomb_ids + junk), level=2)
+    resp = finder.pick_response(table_combo)
+    assert resp is not None
+    assert resp.combo_type == ComboType.NORMAL_BOMB
+    assert can_beat(resp, table_combo)
+    print("  PASS pick_response straight→bomb fallback")
+
+
 def test_edge_all_wild_pair():
     """2 wild cards form a pair at native rank (level)."""
     parser = ComboParser(level=5)
