@@ -29,7 +29,8 @@ class PlayerView:
       - Other players' specific cards
     """
 
-    def __init__(self, state: GameState, player_id: int, action_log: ActionLog = None):
+    def __init__(self, state: GameState, player_id: int, action_log: ActionLog = None,
+                 tribute_records: list = None):
         self._state = state
         self.player_id = player_id
         self.level = state.level
@@ -51,11 +52,15 @@ class PlayerView:
 
         # Memory module
         self.action_log = action_log
-        self.tracker = CardTracker(self.my_hand, action_log) if action_log else None
+        self.tracker = (CardTracker(self.my_hand, action_log, level=state.level)
+                        if action_log else None)
         if self.tracker:
             self.tracker.set_opponent_sizes(
                 {p: self._opponent_sizes[p] for p in range(4) if p != player_id}
             )
+
+        # Public tribute log (who paid whom + displayed card strings only)
+        self.tribute_records = list(tribute_records or [])
 
     @property
     def active_players(self) -> List[int]:
@@ -81,6 +86,46 @@ class PlayerView:
 
     def opponent_hand_size(self, player_id: int) -> int:
         return self._opponent_sizes.get(player_id, 0)
+
+    # ------------------------------------------------------------------
+    # Public-info opponent modeling (stage 4.2)
+    # ------------------------------------------------------------------
+
+    def teammate_id(self) -> int:
+        """Partner seat (opposite parity). Public by the 2v2 seat rule."""
+        return (self.player_id + 2) % 4
+
+    def opponent_public_stats(self, player_id: int) -> dict:
+        """Public observations about ONE other player — never their cards.
+
+        - played_count: cards they have tabled
+        - pass_count: how many times they passed
+        - hand_size: current hand size
+        - passed_on_type/rank: what the table showed when they passed
+        - finished: whether they are done this round
+        """
+        stats = {
+            "player_id": player_id,
+            "hand_size": self._opponent_sizes.get(player_id, 0),
+            "played_count": 0,
+            "pass_count": 0,
+            "passed_on": [],
+            "finished": player_id in self.finished_positions,
+        }
+        if self.action_log:
+            stats["played_count"] = self.action_log.played_count(player_id)
+            stats["pass_count"] = self.action_log.pass_count(player_id)
+            for a in self.action_log.actions:
+                if a.type == "pass" and a.player == player_id and a.passed_on:
+                    stats["passed_on"].append({
+                        "type": a.passed_on.combo_type.name,
+                        "main_rank": a.passed_on.main_rank.name,
+                    })
+        return stats
+
+    def tribute_public_records(self) -> list:
+        """Tribute exchanges are public: who paid whom, what rank left."""
+        return list(self.tribute_records)
 
     def is_player_finished(self, player_id: int) -> bool:
         return player_id in self.finished_positions

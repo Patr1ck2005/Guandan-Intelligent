@@ -538,6 +538,23 @@ class BlindAgent(BaseAgent):
             "finished_positions": view.finished_positions,
         }
 
+        # Public-info opponent modeling (stage 4.2): how much of the game is
+        # already observed? Late in the hand, unseen pools are small, so the
+        # risk of a hidden bomb grows → require a higher bar to spend ours.
+        observed_frac = min(1.0, len(view.played_cards) / 54.0)
+        bomb_guard = p.bomb_overuse_penalty * (0.5 + 0.5 * observed_frac)
+        # Tracker-driven: when NO active opponent plausibly holds a bomb,
+        # covering the trick is safer than the base score suggests.
+        opp_bomb_prob = None
+        if p.opp_model_cover_bonus and view.tracker is not None:
+            probs = [view.tracker.prob_player_has_bomb(p_)
+                     for p_ in view.active_players
+                     if p_ != pid and p_ != teammate]
+            opp_bomb_prob = max(probs) if probs else 1.0
+        if (p.opp_model_cover_bonus and table_combo is not None
+                and opp_bomb_prob is not None and opp_bomb_prob < 0.25):
+            context["_cover_bonus"] = p.opp_model_cover_bonus
+
         best = None
         best_score = float('-inf')
         total = len(hand)
@@ -549,7 +566,8 @@ class BlindAgent(BaseAgent):
                 if table_combo is None:
                     bomb_pen = p.bomb_lead_penalty
                 elif not table_combo.is_bomb:
-                    bomb_pen = p.bomb_overuse_penalty
+                    # Later game → more conservative with bombs over non-bombs
+                    bomb_pen = bomb_guard
                 else:
                     bomb_pen = p.bomb_vs_bomb_bonus
             usage = c.length * p.card_usage_weight

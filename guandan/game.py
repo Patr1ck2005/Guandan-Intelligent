@@ -49,6 +49,10 @@ class Game:
         self.round_results: List[RoundResult] = []
         self.tribute_records: List[dict] = []  # per-round tribute exchange logs
         self.round_number = 0
+        # Public action memory for opponent modeling (stage 4.2); reset each
+        # round since the deck is re-dealt.
+        from .ai.action_log import ActionLog
+        self.action_log = ActionLog()
 
     def play_game(self) -> GameResult:
         """Play until one team wins.
@@ -141,6 +145,7 @@ class Game:
             current_player=starter,
             trick_number=0,
         )
+        self.action_log = type(self.action_log)()  # fresh memory per dealt hand
 
         game_logger.game("round_start", round=self.round_number,
                          level=level, starter=starter,
@@ -195,7 +200,9 @@ class Game:
             agent = self.agents[current]
             hand = self.state.hands[current]
             from .ai.player_view import PlayerView
-            view = PlayerView(self.state, current)
+            view = PlayerView(self.state, current,
+                              action_log=self.action_log,
+                              tribute_records=self.tribute_records)
 
             if self.agent_timeout_ms > 0:
                 timeout_s = self.agent_timeout_ms / 1000
@@ -241,6 +248,8 @@ class Game:
                 combo = result.resolved_combo
                 moved_combo = combo
                 self.state.table.record_play(current, combo)
+                self.action_log.record_play(self.state.trick_number, current,
+                                            play_cards, combo)
                 # Remove cards from hand
                 played_ids = {c.id for c in play_cards}
                 new_hand = tuple(c for c in hand if c.id not in played_ids)
@@ -268,6 +277,8 @@ class Game:
                 # Pass
                 moved_combo = None
                 self.state.table.record_pass(current)
+                self.action_log.record_pass(self.state.trick_number, current,
+                                            self.state.table.current_combo)
                 game_logger.game_debug("pass", player=current,
                                        trick=self.state.trick_number)
 

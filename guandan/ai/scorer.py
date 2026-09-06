@@ -63,6 +63,12 @@ def teammate_context_score(
             and context.get("teammate_passed") and not candidate.is_bomb):
         score += p.block_opponent_lead
 
+    # Tracker-driven (BlindAgent): no active opponent plausibly holds a bomb
+    # → covering the trick is low-risk (weight supplied via context).
+    if (context.get("_cover_bonus") and last_player >= 0
+            and last_player != teammate and not candidate.is_bomb):
+        score += context["_cover_bonus"]
+
     return score
 
 

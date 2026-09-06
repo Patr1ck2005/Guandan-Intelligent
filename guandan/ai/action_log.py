@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from ..card import Card, Rank
+from ..card import Card, Rank, effective_rank
 from ..combo import Combo, ComboType
 
 
@@ -69,6 +69,16 @@ class ActionLog:
                 result.extend(a.cards)
         return result
 
+    def played_count(self, player: int) -> int:
+        """How many cards this player has tabled (public info)."""
+        return sum(len(a.cards) for a in self._actions
+                   if a.type == "play" and a.player == player)
+
+    def pass_count(self, player: int) -> int:
+        """How many times this player passed (public info)."""
+        return sum(1 for a in self._actions
+                   if a.type == "pass" and a.player == player)
+
     def recent(self, n: int) -> List[Action]:
         return self._actions[-n:] if n < len(self._actions) else list(self._actions)
 
@@ -76,10 +86,11 @@ class ActionLog:
 class CardTracker:
     """Derived statistics from ActionLog + own hand."""
 
-    def __init__(self, own_hand: Tuple[Card, ...], log: ActionLog):
+    def __init__(self, own_hand: Tuple[Card, ...], log: ActionLog, level: int = 2):
         # All my cards
         self._my_card_ids: Set[int] = {c.id for c in own_hand}
         self._my_hand = own_hand
+        self._level = level
 
         # Cards each player has played
         self._played_by: Dict[int, Set[int]] = {0: set(), 1: set(), 2: set(), 3: set()}
@@ -98,6 +109,14 @@ class CardTracker:
 
     def set_opponent_sizes(self, sizes: Dict[int, int]):
         self._opp_sizes.update(sizes)
+
+    def played_count(self, player: int) -> int:
+        """How many cards this player has tabled so far (public info)."""
+        return len(self._played_by.get(player, ()))
+
+    def pass_count(self, player: int) -> int:
+        """How many times this player passed (public info)."""
+        return sum(1 for p, _combo in self._pass_history if p == player)
 
     def unseen_cards(self) -> List[Card]:
         """All cards not in my hand and not played by anyone."""
@@ -121,20 +140,44 @@ class CardTracker:
     def sample_opponent_hands(self) -> Dict[int, List[Card]]:
         """Randomly distribute unseen cards to opponents based on hand sizes.
 
-        Uses pass constraints: a player who passed on a combo type
-        likely doesn't have cards that beat it.
+        Honors pass constraints softly (stage 4.2): a player who PASSED on a
+        single of effective rank R does not receive sample cards that would
+        clearly beat that single (eff > R+1), when the constraint is
+        feasible. Other combo types are too coarse for card-level filtering
+        and are skipped. Falls back to unconstrained when the filtered pool
+        cannot cover the hand size.
         """
         unseen = self.unseen_cards()
         random.shuffle(unseen)
 
+        excluded: Dict[int, Set[int]] = {}
+        for player, passed_on in self._pass_history:
+            if passed_on is None or passed_on.combo_type != ComboType.SINGLE:
+                continue
+            r_eff = effective_rank(passed_on.main_rank, self._level)
+            ids = {c.id for c in unseen
+                   if c.rank.value <= 14
+                   and effective_rank(c.rank, self._level) > r_eff + 1}
+            if ids:
+                excluded.setdefault(player, set()).update(ids)
+
         result: Dict[int, List[Card]] = {1: [], 2: [], 3: []}
         pool = list(unseen)
         random.shuffle(pool)
-        idx = 0
+        used: Set[int] = set()
         for pid in [1, 2, 3]:
             size = self._opp_sizes.get(pid, 0)
-            result[pid] = pool[idx:idx + size]
-            idx += size
+            ex = excluded.get(pid)
+            if ex:
+                allowed = [c for c in pool if c.id not in ex and c.id not in used]
+                if len(allowed) >= size:
+                    result[pid] = allowed[:size]
+                    used.update(c.id for c in result[pid])
+                    continue
+                # constraint infeasible for this hand size → unconstrained
+            take = [c for c in pool if c.id not in used][:size]
+            result[pid] = take
+            used.update(c.id for c in take)
         return result
 
     def did_player_pass_on_type(self, player: int, combo_type: ComboType, min_rank: int = 0) -> bool:

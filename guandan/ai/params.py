@@ -45,6 +45,11 @@ class AIParams:
     block_opponent_lead: float = 0.0      # opponent owns table & teammate passed → bonus for covering (压牌)
     push_teammate_endgame: float = 0.0    # teammate finished → per-card bonus to finish fast (护头游)
 
+    # Public-info opponent modeling (stage 4.2; 0.0 = off). When the tracker
+    # says NO active opponent plausibly holds a bomb (prob < 0.25), covering
+    # the trick gets this bonus — opponents are unlikely to punish it.
+    opp_model_cover_bonus: float = 0.0
+
     # Simulation agent: probability of passing when could play
     sim_pass_prob: float = 0.15
 
