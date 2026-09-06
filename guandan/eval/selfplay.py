@@ -2,9 +2,18 @@
 
 Reuses ``Game.play_game()`` to run full 2v2 games and reports win rates / Elo.
 Every result records the exact agent profiles + seed used, so results are
-honest and reproducible (sequential mode) — no hidden parameter reductions.
+honest and reproducible — no hidden parameter reductions.
 Individual game errors (e.g. an agent bug) are recorded rather than aborting
 the whole match.
+
+Parallelism: ``max_workers=1`` runs sequentially in-process with per-move
+live dashboard callbacks. ``max_workers>1`` fans games out to a
+``ProcessPoolExecutor`` (Windows spawn semantics — the worker is a
+module-level function whose args are plain-picklable, agents are rebuilt
+inside each child). Each game is seeded independently, so per-game results
+are IDENTICAL between sequential and parallel runs for the same seed set.
+The trade-off: in multiprocess mode the live dashboard updates once per
+completed game (move-level callbacks cannot cross process boundaries).
 """
 
 from __future__ import annotations
@@ -12,9 +21,9 @@ from __future__ import annotations
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional, Tuple
 
 from ..game import Game
 from ..ai.registry import create_agent_for_player
@@ -65,6 +74,39 @@ class GameRecord:
     error: str = ""
 
 
+class JobInterrupted(Exception):
+    """Raised when progress_cb signals cancellation — aborts the match loop."""
+
+
+def _play_one_process(args: tuple) -> GameRecord:
+    """Multiprocess worker: play ONE game in a fresh process.
+
+    Module-level so it is picklable under Windows spawn semantics. Args are
+    plain data: ``(seed, profile_a, profile_b, agent_timeout_ms)``. The global
+    RNG is re-seeded per game, so results are identical to the sequential
+    run for the same seed.
+
+    Any failure (agent construction, game crash) is contained: the record
+    reports the error and the match keeps going.
+    """
+    seed, profile_a, profile_b, agent_timeout_ms = args
+    try:
+        random.seed(seed)
+        agents = [
+            build_player_agent(profile_a),
+            build_player_agent(profile_b),
+            build_player_agent(profile_a),
+            build_player_agent(profile_b),
+        ]
+        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms)
+        result = game.play_game()
+    except Exception as e:
+        return GameRecord(seed=seed, winning_team=-1, rounds_played=0,
+                          error=f"{type(e).__name__}: {e}")
+    return GameRecord(seed=seed, winning_team=result.winning_team,
+                      rounds_played=result.rounds_played)
+
+
 @dataclass
 class MatchResult:
     a: dict
@@ -96,12 +138,14 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
               max_workers: int = 1, progress_cb=None, live_cb=None) -> MatchResult:
     """Run a 2v2 match (A seats 0/2, B seats 1/3) over ``n_games`` games.
 
-    ``max_workers=1`` (default) is sequential and deterministic for a given
-    seed. ``max_workers>1`` parallelizes across games but shares the global
-    RNG, so individual games are still valid but not seed-reproducible.
+    ``max_workers=1`` (default) is sequential in-process with per-move live
+    dashboard callbacks. ``max_workers>1`` fans games out to a process pool —
+    each game is seeded with ``base_seed + i`` and seeds its own RNG, so
+    per-game results are identical to the sequential run (fully
+    seed-reproducible). Live callbacks degrade to per-game granularity.
 
-    ``live_cb(detail_dict)`` is called after every move with a dashboard
-    snapshot (hand sizes, move timing, per-team think time...).
+    ``live_cb(detail_dict)`` is called with a dashboard snapshot (per-move in
+    sequential mode; per-game in multiprocess mode).
     """
     t0 = time.time()
     _lock = threading.Lock()
@@ -165,18 +209,19 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
 
     def play_one(i: int) -> GameRecord:
         seed = base_seed + i
-        random.seed(seed)
-        agents = [
-            build_player_agent(profile_a),  # seat 0 (team 0)
-            build_player_agent(profile_b),  # seat 1 (team 1)
-            build_player_agent(profile_a),  # seat 2 (team 0)
-            build_player_agent(profile_b),  # seat 3 (team 1)
-        ]
-        _cnt["n"] = 0
-        with _lock:
-            _live["t_last"] = None  # avoid inter-game gap counting as a move
-        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms, on_move=on_move)
         try:
+            random.seed(seed)
+            agents = [
+                build_player_agent(profile_a),  # seat 0 (team 0)
+                build_player_agent(profile_b),  # seat 1 (team 1)
+                build_player_agent(profile_a),  # seat 2 (team 0)
+                build_player_agent(profile_b),  # seat 3 (team 1)
+            ]
+            _cnt["n"] = 0
+            with _lock:
+                _live["t_last"] = None  # avoid inter-game gap counting as a move
+            game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms,
+                        on_move=on_move)
             result = game.play_game()
         except Exception as e:
             return GameRecord(seed=seed, winning_team=-1, rounds_played=0,
@@ -184,12 +229,31 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
         return GameRecord(seed=seed, winning_team=result.winning_team,
                           rounds_played=result.rounds_played)
 
+    def _record_completion(rec: GameRecord, completed: int, label: str):
+        games.append(rec)
+        with _lock:
+            _live["scores"].append(rec.winning_team)
+            _st["completed"] = max(_st["completed"], completed)
+            _st["window"] = 0.0
+        aw = sum(1 for g in games if g.winning_team == 0)
+        if live_cb:
+            live_cb({
+                "mode": "multiprocess" if max_workers > 1 else "sequential",
+                "workers": max_workers,
+                "game": min(completed, n_games), "n_games": n_games,
+                "last_winner_team": rec.winning_team,
+                "last_seed": rec.seed,
+                "scores": list(_live["scores"]),
+            })
+        _emit(f"第 {completed}/{n_games} 局完成 · {label} A {aw} : B {completed - aw}")
+
     games: List[GameRecord] = []
     if max_workers <= 1:
         for i in range(n_games):
             with _lock:
                 _live["scores"].append(-2)  # placeholder; patched on completion
             rec = play_one(i)
+            aw_prev = sum(1 for g in games if g.winning_team == 0)
             games.append(rec)
             with _lock:
                 _live["scores"][-1] = rec.winning_team
@@ -198,19 +262,23 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             aw = sum(1 for g in games if g.winning_team == 0)
             _emit(f"第 {i + 1}/{n_games} 局完成 · A {aw} : B {i + 1 - aw}")
     else:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(play_one, i) for i in range(n_games)]
-            completed = 0
+        workers = min(max_workers, n_games)
+        pool_args = [(base_seed + i, profile_a, profile_b, agent_timeout_ms)
+                     for i in range(n_games)]
+        completed = 0
+        ex = ProcessPoolExecutor(max_workers=workers)
+        try:
+            futures = [ex.submit(_play_one_process, args) for args in pool_args]
             for fut in as_completed(futures):
                 rec = fut.result()
-                games.append(rec)
                 completed += 1
-                with _lock:
-                    _live["scores"].append(rec.winning_team)
-                    _st["completed"] = max(_st["completed"], completed)
-                    _st["window"] = 0.0
-                aw = sum(1 for g in games if g.winning_team == 0)
-                _emit(f"已完成 {completed}/{n_games} 局 · A {aw} : B {completed - aw}")
+                _record_completion(rec, completed, f"多进程{workers}路 ·")
+            ex.shutdown(wait=True)
+        except BaseException:
+            # Cancellation (JobInterrupted) or a broken pool: stop scheduling
+            # new games immediately instead of waiting for in-flight ones.
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
 
     games.sort(key=lambda g: g.seed)
     a_wins = sum(1 for g in games if g.winning_team == 0)
@@ -247,6 +315,9 @@ def run_round_robin(profiles: List[dict], n_games: int = 10, base_seed: int = 0,
                 if progress_cb:
                     # sub_done is run_match's internal 0..100 percent; fold it
                     # into this pair's slice so the bar crawls inside a pair.
+                    # If the job was cancelled, progress_cb raises
+                    # JobCancelled (a JobInterrupted subclass) which aborts
+                    # the sub-match and propagates up through run_round_robin.
                     progress_cb(done * 100 + max(0, min(int(sub_done), 99)),
                                 n_pairs * 100,
                                 f"对局 {done + 1}/{n_pairs} · {na} vs {nb} · {msg}")

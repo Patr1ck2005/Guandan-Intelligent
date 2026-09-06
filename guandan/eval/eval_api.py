@@ -17,7 +17,7 @@ from ..ai.registry import get_schema
 from .common import _build_view, _make_arena_agent
 from .metrics import is_correct
 from .scenario_bank import get_bank, generate_synthetic_scenarios, scenario_json
-from .selfplay import run_match, run_round_robin
+from .selfplay import JobInterrupted, run_match, run_round_robin
 
 eval_bp = Blueprint('eval_api', __name__)
 
@@ -36,8 +36,13 @@ def _cleanup_jobs():
         del _jobs[jid]
 
 
-class JobCancelled(Exception):
-    """Raised inside a background job when the user requests cancellation."""
+class JobCancelled(JobInterrupted):
+    """Raised inside a background job when the user requests cancellation.
+
+    Subclasses ``selfplay.JobInterrupted`` so match/round-robin loops can
+    catch cancellation raised through progress_cb without importing the
+    API layer (no circular import).
+    """
 
 
 def _new_job() -> str:

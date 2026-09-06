@@ -145,7 +145,7 @@ function renderParamPanel() {
     h += `<div class="param-row"><span>局数</span><input type="number" value="${E.nGames}" onchange="E.nGames=+this.value"></div>`;
     h += `<div class="param-row"><span>种子</span><input type="number" value="${E.seed}" onchange="E.seed=+this.value"></div>`;
     h += `<div class="param-row"><span>超时ms</span><input type="number" value="${E.timeoutMs}" onchange="E.timeoutMs=+this.value"></div>`;
-    h += `<div class="param-row"><span>并行</span><input type="number" value="${E.maxWorkers}" onchange="E.maxWorkers=+this.value"></div>`;
+    h += `<div class="param-row"><span>并行</span><input type="number" value="${E.maxWorkers}" onchange="E.maxWorkers=+this.value" title=">1 时走多进程：每局独立 seed、结果与串行完全一致；live 面板按局汇报而非逐步"></div>`;
   } else if (E.mode === 'benchmark') {
     h += `<div class="param-row"><span>最大场景数</span><input type="number" value="${E.maxScenarios}" onchange="E.maxScenarios=+this.value" title="0=全部"></div>`;
   } else if (E.mode === 'generate') {
@@ -312,6 +312,7 @@ const COMBO_CN = { SINGLE: '单张', PAIR: '对子', TRIPLE: '三条', TRIPLE_PA
 
 function renderJobProgress(d) {
   const det = d.detail || {};
+  if (det.mode === 'multiprocess') return renderMpLive(d, det);
   if (det.game !== undefined && det.hand_sizes) return renderMatchLive(d, det);
   if (det.rr_pair) return renderRRLive(d, det);
   if (det.partial_summary) return renderBenchLive(d, det);
@@ -332,6 +333,34 @@ function progressHead(p, msg, extra) {
     <div class="job-eta">已运行 ${elapsed}${eta ? ' · 预计剩余 ' + eta : ''}</div>
     ${msg ? `<div class="job-msg">${escapeHtml(msg)}</div>` : ''}
     ${extra || ''}
+  </div>`;
+}
+
+// Multiprocess match mode: live detail arrives once per completed game
+// (move-level callbacks cannot cross process boundaries). Per-seed results
+// stay identical to sequential mode; the per-move dashboard is the
+// parallel=1 trade-off.
+function renderMpLive(d, det) {
+  const workers = det.workers || '?';
+  const lastW = det.last_winner_team === 0 ? 'A 胜'
+    : det.last_winner_team === 1 ? 'B 胜'
+    : det.last_winner_team === -1 ? '出错' : '—';
+  const stats = [
+    ['并行进程', workers + ' 路'],
+    ['完成局数', `${det.game || 0}/${det.n_games || '?'}`],
+    ['最近结果', lastW],
+    ['最近 seed', det.last_seed ?? '—'],
+  ].map(([k, v]) => `<div class="stat-card"><div class="sc-k">${k}</div><div class="sc-v">${v}</div></div>`).join('');
+  let scoreBlocks = '';
+  if ((det.scores || []).length) {
+    scoreBlocks = '<div class="score-row">' + det.scores.map(s =>
+      `<div class="gblock ${s === 0 ? 'wA' : s === 1 ? 'wB' : s === -2 ? 'wRun' : 'wErr'}"></div>`).join('') + '</div>';
+  }
+  return `<div class="job-running">
+    ${progressHead(d.progress,
+      `多进程模式 · ${workers} 路并行 · 每局完成时更新`, scoreBlocks)}
+    <div class="stat-row">${stats}</div>
+    <div class="emp">多进程模式按局汇报进度（逐步明细请把并行设为 1）</div>
   </div>`;
 }
 
