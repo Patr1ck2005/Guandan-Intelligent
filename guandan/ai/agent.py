@@ -27,7 +27,7 @@ from ..game_state import GameState
 from ..rules import RulesEngine
 from ..score import calculate_result
 from ..state_utils import clone_state, apply_play, start_new_trick, next_active_player, did_team_win
-from .scorer import choose_best_play, score_play
+from .scorer import choose_best_play, score_play, teammate_context_score
 from .opponent import CardCounter
 from ..logging import ai_log
 from .player_view import PlayerView
@@ -441,12 +441,26 @@ class HeuristicAgent(BaseAgent):
 
         can_pass = (not table.is_empty and table.last_played_player != pid)
 
+        # Public teammate context (same helper as BlindAgent; weights
+        # default to 0 so this is a no-op until enabled).
+        teammate = (pid + 2) % 4
+        teammate_passed = any(
+            actor == teammate and combo is None
+            for actor, combo in (table.trick_history or []))
+        context = {
+            "player_id": pid,
+            "last_played_player": table.last_played_player,
+            "teammate_passed": teammate_passed,
+            "finished_positions": view.finished_positions,
+        }
+
         # Score candidates
         scored = []
         for c in candidates:
             used_ids = {x.id for x in c.cards}
             hand_after = tuple(x for x in hand if x.id not in used_ids)
-            s = score_play(c, hand, hand_after, table.current_combo, level, self.params)
+            s = score_play(c, hand, hand_after, table.current_combo, level,
+                           self.params, context=context)
             scored.append((c, s))
 
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -463,7 +477,8 @@ class HeuristicAgent(BaseAgent):
             for c, s in scored[:15]
         ])
 
-        best = choose_best_play(candidates, hand, table.current_combo, level, can_pass, self.params)
+        best = choose_best_play(candidates, hand, table.current_combo, level,
+                                can_pass, self.params, context=context)
 
         elapsed = (time.time() - t0) * 1000
         ai_log(pid, "decision_end",
@@ -510,6 +525,19 @@ class BlindAgent(BaseAgent):
 
         can_pass = (table_combo is not None and table.last_played_player != pid)
 
+        # Public teammate context for 2v2 heuristics (weights default to 0):
+        # seat parity gives the partner; trick_history shows who passed.
+        teammate = (pid + 2) % 4
+        teammate_passed = any(
+            actor == teammate and combo is None
+            for actor, combo in (table.trick_history or []))
+        context = {
+            "player_id": pid,
+            "last_played_player": table.last_played_player,
+            "teammate_passed": teammate_passed,
+            "finished_positions": view.finished_positions,
+        }
+
         best = None
         best_score = float('-inf')
         total = len(hand)
@@ -536,7 +564,8 @@ class BlindAgent(BaseAgent):
                     pos += p.rank_card_lead_penalty * max(1, rank_card_count)
                 elif rv >= 13:  # K, A
                     pos += p.high_rank_lead_penalty
-            s = eff + bomb_pen + usage + pos
+            s = eff + bomb_pen + usage + pos + teammate_context_score(
+                c, table_combo, level, context, p)
             if s > best_score:
                 best_score = s
                 best = c

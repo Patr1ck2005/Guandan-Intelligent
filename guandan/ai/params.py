@@ -37,6 +37,14 @@ class AIParams:
     # Threshold: score below this → pass instead of play
     pass_threshold: float = 0.0
 
+    # 2v2 teammate awareness (public info only; 0.0 = off = no behavior change).
+    # These converge conceptually with the informed/round scorers' fixed
+    # teammate_cover_bonus, but operate on PUBLIC information (seat parity,
+    # trick history, finished positions) so BlindAgent stays blind and fast.
+    support_teammate_lead: float = 0.0    # teammate owns the table → prefer low follow cards (送牌)
+    block_opponent_lead: float = 0.0      # opponent owns table & teammate passed → bonus for covering (压牌)
+    push_teammate_endgame: float = 0.0    # teammate finished → per-card bonus to finish fast (护头游)
+
     # Simulation agent: probability of passing when could play
     sim_pass_prob: float = 0.15
 
