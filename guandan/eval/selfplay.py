@@ -82,15 +82,21 @@ def _play_one_process(args: tuple) -> GameRecord:
     """Multiprocess worker: play ONE game in a fresh process.
 
     Module-level so it is picklable under Windows spawn semantics. Args are
-    plain data: ``(seed, profile_a, profile_b, agent_timeout_ms)``. The global
-    RNG is re-seeded per game, so results are identical to the sequential
-    run for the same seed.
+    plain data: ``(seed, profile_a, profile_b, agent_timeout_ms)``. The game
+    uses an ISOLATED RNG seeded with ``seed`` (not the global random state),
+    so per-game results are identical to the sequential run for the same
+    seed regardless of process scheduling or caller RNG state.
 
     Any failure (agent construction, game crash) is contained: the record
     reports the error and the match keeps going.
     """
     seed, profile_a, profile_b, agent_timeout_ms = args
     try:
+        # Two deterministic sources: (1) an isolated RNG drives the deal and
+        # first-leader draw; (2) random.seed() makes AGENT-level global RNG
+        # consumption (BlindAgent pass rolls, MC sampling shuffles)
+        # deterministic per game. Together: same seed -> same game.
+        rng = random.Random(seed)
         random.seed(seed)
         agents = [
             build_player_agent(profile_a),
@@ -98,7 +104,7 @@ def _play_one_process(args: tuple) -> GameRecord:
             build_player_agent(profile_a),
             build_player_agent(profile_b),
         ]
-        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms)
+        game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms, rng=rng)
         result = game.play_game()
     except Exception as e:
         return GameRecord(seed=seed, winning_team=-1, rounds_played=0,
@@ -210,6 +216,11 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
     def play_one(i: int) -> GameRecord:
         seed = base_seed + i
         try:
+            # Deterministic per (seed, profiles): isolated RNG for the deal +
+            # first leader; random.seed() pins agent-level global RNG use.
+            # The old code only did the second — the deal/starter leaked
+            # the caller's ambient RNG state into results.
+            rng = random.Random(seed)
             random.seed(seed)
             agents = [
                 build_player_agent(profile_a),  # seat 0 (team 0)
@@ -221,7 +232,7 @@ def run_match(profile_a: dict, profile_b: dict, n_games: int = 10,
             with _lock:
                 _live["t_last"] = None  # avoid inter-game gap counting as a move
             game = Game(agents, level=2, agent_timeout_ms=agent_timeout_ms,
-                        on_move=on_move)
+                        on_move=on_move, rng=rng)
             result = game.play_game()
         except Exception as e:
             return GameRecord(seed=seed, winning_team=-1, rounds_played=0,

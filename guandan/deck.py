@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from . import constants
 from .card import Card
@@ -20,10 +20,16 @@ class Deck:
         return cards
 
     @staticmethod
-    def shuffle(cards: List[Card]) -> List[Card]:
-        """Return a shuffled copy of the cards."""
+    def shuffle(cards: List[Card], rng: Optional[random.Random] = None) -> List[Card]:
+        """Return a shuffled copy of the cards.
+
+        ``rng``: an explicit Random instance for reproducibility. When None,
+        the global RNG is used (legacy behaviour). The self-play harness
+        passes an isolated RNG so per-seed games are fully deterministic
+        regardless of the caller's global RNG state.
+        """
         c = list(cards)
-        random.shuffle(c)
+        (rng or random).shuffle(c)
         return c
 
     @staticmethod

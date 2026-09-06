@@ -37,7 +37,7 @@ class Game:
     MAX_TRICK_ITERATIONS = 200
 
     def __init__(self, agents: List, level: int = 2, agent_timeout_ms: float = 75000,
-                 on_move=None):
+                 on_move=None, rng: Optional[random.Random] = None):
         if len(agents) != 4:
             raise ValueError(f"Need exactly 4 agents, got {len(agents)}")
         self.agents = agents
@@ -49,6 +49,10 @@ class Game:
         self.round_results: List[RoundResult] = []
         self.tribute_records: List[dict] = []  # per-round tribute exchange logs
         self.round_number = 0
+        # Isolated RNG for dealing + first-leader draws: when provided, the
+        # whole game (deal order + starter choice) is reproducible from that
+        # seed alone, independent of the caller's global random state.
+        self.rng = rng if rng is not None else random
         # Public action memory for opponent modeling (stage 4.2); reset each
         # round since the deck is re-dealt.
         from .ai.action_log import ActionLog
@@ -104,14 +108,14 @@ class Game:
             level = self.team_levels[0]
         self.rules = RulesEngine(level)
 
-        # Deal
-        deck = Deck.shuffle(Deck.create())
+        # Deal (isolated RNG → per-seed reproducible shuffles)
+        deck = Deck.shuffle(Deck.create(), rng=self.rng)
         hands = Deck.deal(deck)
 
         # Determine starter & tribute.
         tribute_plan = None
         if self.round_number == 1 or starter_hint is None:
-            starter = random.randint(0, 3)
+            starter = self.rng.randint(0, 3)
         else:
             # Tribute for the upcoming round: the previous round's finish
             # order decides payers/receivers; 抗贡 needs the dealt hands.
