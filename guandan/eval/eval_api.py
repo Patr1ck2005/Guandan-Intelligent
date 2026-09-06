@@ -8,6 +8,7 @@ Each job reports granular ``progress`` (0-1) and a human-readable ``message``.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -495,6 +496,92 @@ def regression_save_baseline():
     if not ok:
         return jsonify({"error": "run not found"}), 404
     return jsonify({"saved": True, "run_id": run_id})
+
+
+# ------------------------------------------------------------------
+# AIParams auto-tuner (stage 4.3)
+# ------------------------------------------------------------------
+
+@eval_bp.route("/api/eval/tuner", methods=["POST"])
+def tuner():
+    from .tuner import TunerBudget, run_tuner
+    data = request.get_json() or {}
+    budget = TunerBudget(
+        max_candidates=int(data.get("max_candidates", 12)),
+        games_per_candidate=int(data.get("games_per_candidate", 8)),
+        max_seconds=float(data.get("max_seconds", 600)),
+        max_workers=int(data.get("max_workers", 2)),
+        base_seed=int(data.get("seed", 7000)),
+    )
+    jid = _new_job("tuner")
+    _jobs[jid]["params"] = {
+        "budget": {"max_candidates": budget.max_candidates,
+                   "games_per_candidate": budget.games_per_candidate,
+                   "max_seconds": budget.max_seconds,
+                   "max_workers": budget.max_workers,
+                   "base_seed": budget.base_seed},
+        "reference": "blind-base",
+    }
+
+    def run(progress_cb, live_cb):
+        return run_tuner(budget, progress_cb=progress_cb, live_cb=live_cb,
+                         cancel_check=lambda: _is_cancelled(jid))
+
+    _spawn(jid, run)
+    return jsonify({"job_id": jid})
+
+
+@eval_bp.route("/api/eval/tuner/best")
+def tuner_best():
+    from .store import list_runs
+    runs = list_runs(kind="tuner", limit=1)
+    if not runs:
+        return jsonify({"run": None})
+    return jsonify({"run": runs[0],
+                    "best": (runs[0].get("summary") or {}).get("best")})
+
+
+@eval_bp.route("/api/eval/tuner/apply", methods=["POST"])
+def tuner_apply():
+    """Write the tuner's best AIParams weights into config.json (blind model).
+
+    Returns the applied diff. Refuses when weights are absent. Config POST
+    semantics elsewhere string-key players; this only touches
+    decider.model_params.blind (the model-level defaults).
+    """
+    import json as _json
+    from .store import list_runs
+    data = request.get_json() or {}
+    run_id = data.get("run_id")
+    weights = data.get("weights")
+    if not weights and run_id:
+        runs = list_runs(kind="tuner", limit=5)
+        for r in runs:
+            if r["id"] == run_id:
+                weights = (r.get("summary") or {}).get("best", {}).get("weights")
+                break
+    if not weights:
+        return jsonify({"error": "no weights provided or found"}), 400
+
+    cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "config.json")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = _json.load(f)
+        before = dict(cfg.get("decider", {}).get("model_params", {}).get("blind", {}))
+        blind_params = cfg.setdefault("decider", {}).setdefault(
+            "model_params", {}).setdefault("blind", {})
+        blind_params.update(weights)
+        # keep inner blind in sync (BlindAgent is used as inner model too)
+        cfg.setdefault("inner_model", {}).setdefault(
+            "model_params", {}).setdefault("blind", {}).update(weights)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            _json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return jsonify({"error": f"config write failed: {e}"}), 500
+    diff = {k: {"from": before.get(k), "to": v} for k, v in weights.items()
+            if before.get(k) != v}
+    return jsonify({"applied": True, "diff": diff})
 
 
 # ------------------------------------------------------------------

@@ -38,6 +38,7 @@ let E = {
   nGames: 3, seed: 0, timeoutMs: 20000, maxWorkers: 1,
   maxScenarios: 0,
   genN: 50, genMaxCards: 4, genSeed: 0, genTimeLimit: 5000,
+  tunerCands: 12, tunerGames: 8, tunerSeconds: 600, tunerWorkers: 2, tunerSeed: 7000,
   jobTimer: null,
   jobStart: null,
   jobId: null,     // currently running job (for stop)
@@ -159,6 +160,12 @@ function renderParamPanel() {
     h += `<div class="param-row"><span>每家最多张</span><input type="number" value="${E.genMaxCards}" onchange="E.genMaxCards=+this.value"></div>`;
     h += `<div class="param-row"><span>种子</span><input type="number" value="${E.genSeed}" onchange="E.genSeed=+this.value"></div>`;
     h += `<div class="param-row"><span>求解时限ms</span><input type="number" value="${E.genTimeLimit}" onchange="E.genTimeLimit=+this.value"></div>`;
+  } else if (E.mode === 'tuner') {
+    h += `<div class="param-row"><span>候选数</span><input type="number" value="${E.tunerCands}" onchange="E.tunerCands=+this.value" title="粗搜候选组数"></div>`;
+    h += `<div class="param-row"><span>每组局数</span><input type="number" value="${E.tunerGames}" onchange="E.tunerGames=+this.value" title="每组权重打多少局定胜率"></div>`;
+    h += `<div class="param-row"><span>预算秒</span><input type="number" value="${E.tunerSeconds}" onchange="E.tunerSeconds=+this.value" title="硬性墙钟上限，到了就停"></div>`;
+    h += `<div class="param-row"><span>并行</span><input type="number" value="${E.tunerWorkers}" onchange="E.tunerWorkers=+this.value"></div>`;
+    h += `<div class="param-row"><span>种子</span><input type="number" value="${E.tunerSeed}" onchange="E.tunerSeed=+this.value"></div>`;
   }
   document.getElementById('param-panel').innerHTML = h || '<span class="emp">无参数</span>';
 
@@ -167,6 +174,7 @@ function renderParamPanel() {
   else if (E.mode === 'match') btn = `<button class="btn btn-gn" onclick="runMatch()">开始自对弈</button>`;
   else if (E.mode === 'roundrobin') btn = `<button class="btn btn-gn" onclick="runRoundRobin()">开始循环赛</button>`;
   else if (E.mode === 'generate') btn = `<button class="btn btn-gn" onclick="runGenerate()">生成题库</button>`;
+  else if (E.mode === 'tuner') btn = `<button class="btn btn-gn" onclick="runTuner()">开始调参</button>`;
   const stop = E.jobId ? `<button class="btn btn-red" onclick="stopJob()">停止</button>` : '';
   document.getElementById('run-panel').innerHTML = `<div style="display:flex;gap:6px">${btn}${stop}</div>`;
 }
@@ -231,6 +239,74 @@ async function runGenerate() {
   const body = { n: E.genN, max_cards: E.genMaxCards, seed: E.genSeed, time_limit_ms: E.genTimeLimit };
   const d = await postJob('/api/eval/scenarios/generate', body, el);
   startJob(d.job_id, renderGenerate);
+}
+
+// ==================================================================
+// Tuner (stage 4.3)
+// ==================================================================
+
+async function runTuner() {
+  const el = document.getElementById('eval-result');
+  el.innerHTML = '<div class="running">启动调参（随机搜索 + 局部细化）…</div>';
+  const body = { max_candidates: E.tunerCands, games_per_candidate: E.tunerGames,
+                 max_seconds: E.tunerSeconds, max_workers: E.tunerWorkers, seed: E.tunerSeed };
+  const d = await postJob('/api/eval/tuner', body, el);
+  startJob(d.job_id, renderTunerResult);
+}
+
+function renderTunerLive(d, det) {
+  const phase = det.phase === 'refine' ? '细化' : '粗搜';
+  const bw = det.best_weights || {};
+  const wTxt = Object.entries(bw).map(([k, v]) => `${k}=${v}`).join(' · ') || '—';
+  return `<div class="job-running">
+    ${progressHead(d.progress, `${phase} ${det.done}/${det.of} · 当前最优胜率 ${((det.best_wr || 0) * 100).toFixed(1)}%`)}
+    <h3>当前最优权重</h3><div class="mono" style="font-size:0.75em;word-break:break-all">${escapeHtml(wTxt)}</div>
+    <h3>最近试验</h3><table class="ev"><tr><th>胜率</th><th>Wilson 区间</th><th>局数</th></tr>
+    ${(det.trials || []).slice().reverse().map(t => `<tr><td>${(t.win_rate * 100).toFixed(1)}%</td><td class="mono">[${t.wilson[0]}–${t.wilson[1]}]</td><td>${t.games}</td></tr>`).join('')}</table>
+  </div>`;
+}
+
+function renderTunerResult(res) {
+  const b = res.best || {};
+  const verdictTxt = res.verdict === 'effective' ? '<span class="badge badge-green">有效（Wilson 下界 &gt; 50%）</span>'
+    : res.verdict === 'inconclusive' ? '<span class="badge badge-gray">不确定（区间跨 50%）</span>'
+    : `<span class="badge badge-gray">${escapeHtml(res.verdict || '-')}</span>`;
+  let h = `<h3>调参完成</h3><div>${verdictTxt} <span class="mono">最优胜率 ${((b.win_rate || 0) * 100).toFixed(1)}% [${(b.wilson || [0, 0])[0]}–${(b.wilson || [0, 0])[1]}]（${b.wins || 0}/${b.games || 0} 局）</span></div>`;
+  h += `<div class="emp" style="text-align:left;padding:6px 0">随机搜索 + 局部细化，非全局最优；预算 ${res.budget?.elapsed_s ?? '?'}s，种子 ${res.budget?.base_seed}</div>`;
+  h += '<h3>最优权重</h3><table class="ev"><tr><th>参数</th><th>取值</th><th>搜索范围</th></tr>' +
+    Object.entries(b.weights || {}).map(([k, v]) =>
+      `<tr><td>${escapeHtml(k)}</td><td class="mono">${v}</td><td class="mono">[${(res.search_space[k] || [])[0]}, ${(res.search_space[k] || [])[1]}]</td></tr>`).join('') + '</table>';
+  h += '<h3>全部试验</h3><table class="ev"><tr><th>#</th><th>胜率</th><th>Wilson</th><th>胜/负</th><th>seed</th></tr>' +
+    (res.trials || []).map((t, i) => `<tr><td>${i + 1}</td><td>${(t.win_rate * 100).toFixed(1)}%</td><td class="mono">[${t.wilson[0]}–${t.wilson[1]}]</td><td>${t.wins}/${t.losses}</td><td class="mono">${t.seed}</td></tr>`).join('') + '</table>';
+  h += `<div style="margin-top:10px;display:flex;gap:8px">
+    <button class="btn btn-gn" onclick="applyTunerWeights()">应用最优权重到 config.json</button>
+    <button class="btn btn-gy" onclick="renderHistory()">查看历史</button></div>`;
+  document.getElementById('eval-result').innerHTML = h;
+}
+
+async function applyTunerWeights() {
+  if (!E.lastTunerRunId) {
+    // find latest tuner run
+    try {
+      const r = await fetch('/api/eval/tuner/best');
+      const d = await r.json();
+      E.lastTunerRunId = d.run && d.run.id;
+    } catch (e) { /* ignore */ }
+  }
+  const el = document.getElementById('eval-result');
+  try {
+    const r = await fetch('/api/eval/tuner/apply', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: E.lastTunerRunId }) });
+    const d = await r.json();
+    if (d.error) { el.innerHTML = '<div class="bad">应用失败: ' + escapeHtml(d.error) + '</div>'; return; }
+    const rows = Object.entries(d.diff || {}).map(([k, v]) =>
+      `<tr><td>${escapeHtml(k)}</td><td class="mono">${v.from}</td><td class="mono">${v.to}</td></tr>`).join('') || '<tr><td colspan="3">无变化</td></tr>';
+    document.getElementById('eval-result').insertAdjacentHTML('beforeend',
+      `<h3>已应用（diff）</h3><table class="ev"><tr><th>参数</th><th>原值</th><th>新值</th></tr>${rows}</table>`);
+  } catch (e) {
+    el.innerHTML = '<div class="bad">应用失败: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 async function postJob(url, body, el) {
@@ -320,6 +396,7 @@ const COMBO_CN = { SINGLE: '单张', PAIR: '对子', TRIPLE: '三条', TRIPLE_PA
 function renderJobProgress(d) {
   const det = d.detail || {};
   if (det.mode === 'multiprocess') return renderMpLive(d, det);
+  if (det.phase) return renderTunerLive(d, det);
   if (det.game !== undefined && det.hand_sizes) return renderMatchLive(d, det);
   if (det.rr_pair) return renderRRLive(d, det);
   if (det.partial_summary) return renderBenchLive(d, det);
