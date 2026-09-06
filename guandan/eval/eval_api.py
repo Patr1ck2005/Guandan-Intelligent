@@ -143,10 +143,20 @@ def _spawn(jid: str, fn):
 
     def target():
         try:
-            _jobs[jid]["result"] = fn(progress_cb, live_cb)
+            result = fn(progress_cb, live_cb)
+            _jobs[jid]["result"] = result
             _jobs[jid]["status"] = "done"
             _jobs[jid]["progress"] = 1.0
             _jobs[jid]["message"] = "完成"
+            # Auto-persist (never breaks the job): benchmarks/matches/RR
+            # are recorded into the SQLite history store with their params.
+            try:
+                kind = _jobs[jid].get("kind", "generic")
+                params = _jobs[jid].get("params") or {}
+                from .store import store_run
+                _jobs[jid]["run_id"] = store_run(kind, params, result)
+            except Exception:
+                pass
         except JobCancelled:
             _jobs[jid]["status"] = "cancelled"
             _jobs[jid]["message"] = "已停止"
@@ -204,6 +214,8 @@ def generate_scenarios():
     time_limit_ms = int(data.get("time_limit_ms", 5000))
 
     jid = _new_job("generate")
+    _jobs[jid]["params"] = {"n": n, "level": level, "max_cards": max_cards,
+                            "seed": seed, "time_limit_ms": time_limit_ms}
 
     def gen(progress_cb, live_cb):
         scenarios = generate_synthetic_scenarios(
@@ -232,6 +244,9 @@ def benchmark():
         scenarios = scenarios[:max_scenarios]
 
     jid = _new_job("benchmark")
+    _jobs[jid]["params"] = {"models": model_profiles, "category": category,
+                            "source": source, "difficulty": difficulty,
+                            "max_scenarios": max_scenarios}
 
     def run(progress_cb, live_cb):
         return run_scenario_benchmark(scenarios, model_profiles,
@@ -252,6 +267,8 @@ def match():
     max_workers = int(data.get("max_workers", 1))
 
     jid = _new_job("match")
+    _jobs[jid]["params"] = {"a": profile_a, "b": profile_b, "n_games": n_games,
+                            "seed": base_seed, "max_workers": max_workers}
 
     def run(progress_cb, live_cb):
         m = run_match(profile_a, profile_b, n_games=n_games, base_seed=base_seed,
@@ -273,6 +290,8 @@ def round_robin():
     max_workers = int(data.get("max_workers", 1))
 
     jid = _new_job("round_robin")
+    _jobs[jid]["params"] = {"models": profiles, "n_games": n_games,
+                            "seed": base_seed, "max_workers": max_workers}
 
     def run(progress_cb, live_cb):
         return run_round_robin(profiles, n_games=n_games, base_seed=base_seed,
@@ -302,6 +321,7 @@ def job_status(job_id):
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),
         "detail_truncated": bool(job.get("detail_truncated")),
+        "run_id": job.get("run_id"),
     })
 
 
@@ -315,6 +335,30 @@ def cancel_job(job_id):
         job["status"] = "cancelling"
         job["message"] = "正在停止…"
     return jsonify({"job_id": job_id, "status": job["status"]})
+
+
+# ------------------------------------------------------------------
+# History (SQLite-backed, stage 3)
+# ------------------------------------------------------------------
+
+@eval_bp.route("/api/eval/history")
+def history():
+    from .store import list_runs
+    kind = request.args.get("kind") or None
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+    except ValueError:
+        limit = 50
+    return jsonify({"runs": list_runs(kind=kind, limit=limit)})
+
+
+@eval_bp.route("/api/eval/history/<int:run_id>")
+def history_detail(run_id):
+    from .store import get_run
+    run = get_run(run_id)
+    if run is None:
+        return jsonify({"error": "run not found"}), 404
+    return jsonify(run)
 
 
 # ------------------------------------------------------------------

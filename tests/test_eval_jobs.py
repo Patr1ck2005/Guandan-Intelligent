@@ -115,11 +115,19 @@ def test_new_job_cancels_running_single_active():
 
 def test_spawn_records_finished_at():
     """_spawn target records finished_at on all terminal outcomes."""
+    def wait_terminal(jid, timeout=5):
+        deadline = time.time() + timeout
+        # finished_at is set in a finally AFTER the status flips — poll for
+        # it (or an error state) directly to avoid the flip/poll race.
+        while time.time() < deadline:
+            j = E._jobs[jid]
+            if j["finished_at"] is not None or j["status"] == "error":
+                return
+            time.sleep(0.02)
+
     jid = E._new_job("benchmark")
     E._spawn(jid, lambda p, l: {"ok": True})
-    deadline = time.time() + 5
-    while E._jobs[jid]["status"] == "running" and time.time() < deadline:
-        time.sleep(0.02)
+    wait_terminal(jid)
     assert E._jobs[jid]["status"] == "done"
     assert E._jobs[jid]["finished_at"] is not None
     # error path
@@ -127,9 +135,7 @@ def test_spawn_records_finished_at():
     def boom(p, l):
         raise ValueError("boom")
     E._spawn(jid2, boom)
-    deadline = time.time() + 5
-    while E._jobs[jid2]["status"] == "running" and time.time() < deadline:
-        time.sleep(0.02)
+    wait_terminal(jid2)
     assert E._jobs[jid2]["status"] == "error"
     assert E._jobs[jid2]["finished_at"] is not None
     assert "boom" in (E._jobs[jid2]["error"] or "")
