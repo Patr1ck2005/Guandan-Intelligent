@@ -16,7 +16,7 @@ from flask import Blueprint, jsonify, request
 
 from ..ai.registry import get_schema
 from .common import _build_view, _make_arena_agent
-from .metrics import is_correct
+from .metrics import agreement_rate, is_correct, wilson_interval
 from .scenario_bank import get_bank, generate_synthetic_scenarios, scenario_json
 from .selfplay import JobInterrupted, run_match, run_round_robin
 
@@ -362,6 +362,142 @@ def history_detail(run_id):
 
 
 # ------------------------------------------------------------------
+# Report export (stage 3.3)
+# ------------------------------------------------------------------
+
+@eval_bp.route("/api/eval/export/<int:run_id>")
+def export_run(run_id):
+    from .store import get_run
+    from flask import Response
+    run = get_run(run_id)
+    if run is None:
+        return jsonify({"error": "run not found"}), 404
+    fmt = request.args.get("format", "json")
+    if fmt == "json":
+        return Response(
+            json.dumps(run, ensure_ascii=False, indent=2, default=str),
+            mimetype="application/json",
+            headers={"Content-Disposition":
+                     f"attachment; filename=guandan_run_{run_id}.json"})
+    if fmt == "csv":
+        lines = ["model_id,model_name,accuracy,elo,wins,losses,avg_ms"]
+        for m in run.get("models", []):
+            lines.append(",".join(str(x) if x is not None else ""
+                                  for x in [m.get("model_id"),
+                                            _csv_escape(m.get("model_name")),
+                                            m.get("accuracy"), m.get("elo"),
+                                            m.get("wins"), m.get("losses"),
+                                            m.get("avg_ms")]))
+        return Response("\n".join(lines), mimetype="text/csv",
+                        headers={"Content-Disposition":
+                                 f"attachment; filename=guandan_run_{run_id}.csv"})
+    if fmt == "html":
+        html = _render_report_html(run)
+        return Response(html, mimetype="text/html")
+    return jsonify({"error": f"unknown format: {fmt}"}), 400
+
+
+def _csv_escape(v):
+    if v is None:
+        return ""
+    s = str(v)
+    if "," in s or '"' in s or "\n" in s:
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _render_report_html(run: dict) -> str:
+    """Self-contained single-file report: inline CSS + tables + params."""
+    models = run.get("models", [])
+    model_rows = "".join(
+        f"<tr><td>{_h(m.get('model_id'))}</td><td>{_h(m.get('model_name'))}</td>"
+        f"<td>{_h(m.get('accuracy'))}</td><td>{_h(m.get('elo'))}</td>"
+        f"<td>{_h(m.get('wins'))} / {_h(m.get('losses'))}</td>"
+        f"<td>{_h(m.get('avg_ms'))}</td></tr>"
+        for m in models) or '<tr><td colspan="6">无模型数据</td></tr>'
+    params = json.dumps(run.get("params") or {}, ensure_ascii=False,
+                        indent=2, default=str)
+    summary = json.dumps(run.get("summary") or {}, ensure_ascii=False,
+                         indent=2, default=str)
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<title>掼蛋评估报告 #{run.get('id')} · {_h(run.get('kind'))}</title>
+<style>
+body {{ font-family:'Segoe UI',system-ui,sans-serif; max-width:860px; margin:24px auto; padding:0 16px; color:#222; }}
+h1 {{ font-size:1.3em; border-bottom:2px solid #daa520; padding-bottom:6px; }}
+h2 {{ font-size:1.05em; color:#8a6508; margin-top:22px; }}
+table {{ border-collapse:collapse; width:100%; font-size:0.9em; }}
+th, td {{ border:1px solid #ddd; padding:5px 9px; text-align:left; }}
+th {{ background:#f7f3e8; }}
+pre {{ background:#f6f6f6; border:1px solid #e3e3e3; border-radius:6px; padding:10px; overflow-x:auto; font-size:0.8em; }}
+.meta {{ color:#666; font-size:0.85em; }}
+footer {{ margin-top:30px; color:#999; font-size:0.75em; border-top:1px solid #eee; padding-top:8px; }}
+</style></head><body>
+<h1>掼蛋评估报告 #{run.get('id')} — {_h(run.get('kind'))}</h1>
+<p class="meta">时间(UTC): {_h(run.get('ts_utc'))} · git: {_h(run.get('git_commit')) or '-'} ·
+seed: {_h(run.get('seed'))} · notes: {_h(run.get('notes')) or '-'}</p>
+<h2>模型明细</h2>
+<table><tr><th>模型ID</th><th>名称</th><th>准确率</th><th>Elo</th><th>胜/负</th><th>平均耗时(ms)</th></tr>
+{model_rows}</table>
+<h2>参数快照</h2><pre>{_h(params)}</pre>
+<h2>结果摘要</h2><pre>{_h(summary)}</pre>
+<footer>Guandan Intelligent · 自包含单文件报告 · 生成于 {_h(run.get('ts_utc'))}</footer>
+</body></html>"""
+
+
+def _h(v) -> str:
+    """HTML-escape any value for the report template."""
+    from markupsafe import escape
+    return str(escape(v if v is not None else "-"))
+
+
+# ------------------------------------------------------------------
+# Regression baseline (stage 3.5)
+# ------------------------------------------------------------------
+
+@eval_bp.route("/api/eval/regression", methods=["POST"])
+def run_regression():
+    from .regression import run_regression_suite
+    data = request.get_json() or {}
+    match_n = max(1, min(int(data.get("match_n_games", 3)), 10))
+    base_seed = int(data.get("seed", 4242))
+
+    jid = _new_job("regression")
+    _jobs[jid]["params"] = {"match_n_games": match_n, "seed": base_seed,
+                            "reference": "blind+mc benchmark, blind-vs-blind match"}
+
+    def run(progress_cb, live_cb):
+        return run_regression_suite(progress_cb=progress_cb, live_cb=live_cb,
+                                    match_n_games=match_n, base_seed=base_seed)
+
+    _spawn(jid, run)
+    return jsonify({"job_id": jid})
+
+
+@eval_bp.route("/api/eval/regression/latest")
+def regression_latest():
+    from .store import list_runs
+    runs = list_runs(kind="regression", limit=1)
+    if not runs:
+        return jsonify({"run": None})
+    r = runs[0]
+    return jsonify({"run": r, "verdict": (r.get("summary") or {}).get("verdict")})
+
+
+@eval_bp.route("/api/eval/regression/baseline", methods=["POST"])
+def regression_save_baseline():
+    from .store import save_baseline
+    data = request.get_json() or {}
+    run_id = int(data.get("run_id", 0))
+    if not run_id:
+        return jsonify({"error": "run_id required"}), 400
+    ok = save_baseline(run_id)
+    if not ok:
+        return jsonify({"error": "run not found"}), 404
+    return jsonify({"saved": True, "run_id": run_id})
+
+
+# ------------------------------------------------------------------
 # Benchmark runner (module-level so tests can import it)
 # ------------------------------------------------------------------
 
@@ -427,6 +563,7 @@ def run_scenario_benchmark(scenarios, model_profiles, perspective: int = 0,
                 partial = [{
                     "model": mid_, "model_name": s["name"],
                     "accuracy": round(s["correct"] / s["total"] * 100, 1),
+                    "wilson": [round(v * 100, 1) for v in wilson_interval(s["correct"], s["total"])],
                     "correct": s["correct"], "total": s["total"],
                     "avg_ms": round(s["ms"] / s["total"], 1),
                 } for mid_, s in by_model.items()]
@@ -447,9 +584,14 @@ def run_scenario_benchmark(scenarios, model_profiles, perspective: int = 0,
 
     summary = []
     for mid, s in by_model.items():
+        accuracy = round(s["correct"] / s["total"] * 100, 1) if s["total"] else 0
+        lo, hi = wilson_interval(s["correct"], s["total"])
         summary.append({
             "model": mid, "model_name": s["name"],
-            "accuracy": round(s["correct"] / s["total"] * 100, 1) if s["total"] else 0,
+            "accuracy": accuracy,
+            "wilson": [round(lo * 100, 1), round(hi * 100, 1)],  # 95% CI (pp)
+            "agreement_rate": (round(agreement_rate(s.get("labels", [])), 3)
+                               if s.get("labels") else None),
             "avg_ms": round(s["ms"] / s["total"], 1) if s["total"] else 0,
             "correct": s["correct"], "total": s["total"],
         })

@@ -271,3 +271,44 @@ def get_run(run_id: int, db_path: Optional[str] = None) -> Optional[dict]:
         except Exception:
             pass
         return None
+
+
+def get_baseline(kind: str = "regression",
+                 db_path: Optional[str] = None) -> Optional[dict]:
+    """The most recent run explicitly saved as a baseline (notes=baseline:)."""
+    try:
+        conn = _get_conn(db_path)
+        with _lock:
+            cur = conn.execute(
+                "SELECT id FROM runs WHERE kind=? AND notes LIKE 'baseline:%'"
+                " ORDER BY id DESC LIMIT 1", (kind,))
+            row = cur.fetchone()
+        return get_run(row[0], db_path) if row else None
+    except Exception as e:
+        try:
+            game_logger.warning("eval_store_read_failed", error=str(e))
+        except Exception:
+            pass
+        return None
+
+
+def save_baseline(run_id: int, kind: str = "regression",
+                  db_path: Optional[str] = None) -> bool:
+    """Mark an existing run as the baseline (notes prefix 'baseline:')."""
+    try:
+        conn = _get_conn(db_path)
+        with _lock:
+            cur = conn.execute("SELECT kind FROM runs WHERE id=?", (run_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            conn.execute("UPDATE runs SET notes=? WHERE id=?",
+                         (f"baseline:{kind}", run_id))
+            conn.commit()
+        return True
+    except Exception as e:
+        try:
+            game_logger.warning("eval_store_failed", error=str(e))
+        except Exception:
+            pass
+        return False

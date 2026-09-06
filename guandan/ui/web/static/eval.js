@@ -84,6 +84,7 @@ function setMode(mode) {
   document.querySelectorAll('.etab').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   document.getElementById('match-pick').style.display = (mode === 'match') ? '' : 'none';
   if (mode === 'match') renderMatchPicker();
+  if (mode === 'history') { renderParamPanel(); renderHistory(); return; }
   renderParamPanel();
   document.getElementById('eval-result').innerHTML = '<div class="emp">选择评估类型并运行</div>';
 }
@@ -140,6 +141,11 @@ function renderMatchPicker() {
 // Param panel
 // ==================================================================
 function renderParamPanel() {
+  if (E.mode === 'history') {
+    document.getElementById('param-panel').innerHTML = '<span class="emp">历史为只读视图</span>';
+    document.getElementById('run-panel').innerHTML = '';
+    return;
+  }
   let h = '';
   if (E.mode === 'match' || E.mode === 'roundrobin') {
     h += `<div class="param-row"><span>局数</span><input type="number" value="${E.nGames}" onchange="E.nGames=+this.value"></div>`;
@@ -182,8 +188,9 @@ async function runBenchmark() {
 
 function renderBenchmark(d) {
   const sum = d.summary || [], res = d.results || [];
+  const ciTxt = s => (s.wilson ? ` <span class="mono">[${s.wilson[0]}–${s.wilson[1]}]</span>` : '');
   let h = '<h3>排行榜</h3><table class="ev"><tr><th>模型</th><th>准确率</th><th>正确/总数</th><th>平均</th></tr>' +
-    sum.map(s => `<tr><td>${escapeHtml(s.model_name)}</td><td class="${s.accuracy >= 80 ? 'ok' : 'bad'}">${s.accuracy}%</td><td>${s.correct}/${s.total}</td><td>${s.avg_ms}ms</td></tr>`).join('') + '</table>';
+    sum.map(s => `<tr><td>${escapeHtml(s.model_name)}</td><td class="${s.accuracy >= 80 ? 'ok' : 'bad'}">${s.accuracy}%${ciTxt(s)}</td><td>${s.correct}/${s.total}</td><td>${s.avg_ms}ms</td></tr>`).join('') + '</table>';
   // per-scenario matrix
   const models = sum.map(s => s.model);
   const bySc = {};
@@ -436,7 +443,7 @@ function renderBenchLive(d, det) {
   const board = sum.length
     ? '<table class="ev"><tr><th>模型</th><th>准确率</th><th>正确/总数</th><th>平均</th></tr>'
       + sum.map(s => `<tr><td>${escapeHtml(s.model_name)}</td>
-        <td class="${s.accuracy >= 80 ? 'ok' : s.accuracy >= 50 ? '' : 'bad'}">${s.accuracy}%</td>
+        <td class="${s.accuracy >= 80 ? 'ok' : s.accuracy >= 50 ? '' : 'bad'}">${s.accuracy}%${s.wilson ? ` <span class="mono">[${s.wilson[0]}–${s.wilson[1]}]</span>` : ''}</td>
         <td>${s.correct}/${s.total}</td><td>${s.avg_ms}ms</td></tr>`).join('') + '</table>'
     : '<div class="emp">等待首个场景完成…</div>';
   // Matrix cells light up as results land
@@ -513,6 +520,238 @@ function renderGenerate(d) {
     (d.scenarios || []).map(s => `<tr><td>${escapeHtml(s.id)}</td><td>${escapeHtml(s.name)}</td><td>${s.hand_size}张</td><td>${s.expected_pass ? '过牌' : '出牌'}</td></tr>`).join('') + '</table>';
   document.getElementById('eval-result').innerHTML = h;
   init(); // refresh counts
+}
+
+// ==================================================================
+// History — persisted runs (SQLite store), Elo trend, A/B compare
+// ==================================================================
+
+const HIST_COLORS = ['#4e8cff', '#e67e22', '#27ae60', '#9b59b6', '#e74c3c', '#16a085'];
+
+async function renderHistory() {
+  const el = document.getElementById('eval-result');
+  el.innerHTML = '<div class="emp">加载历史…</div>';
+  let runs = [];
+  try {
+    const r = await fetch('/api/eval/history?limit=100');
+    const d = await r.json();
+    runs = d.runs || [];
+  } catch (e) {
+    el.innerHTML = '<div class="bad">加载失败: ' + escapeHtml(e.message) + '</div>';
+    return;
+  }
+  if (!runs.length) {
+    el.innerHTML = '<div class="emp">暂无历史记录 — 跑一次基准 / 自对弈后会自动入库</div>';
+    return;
+  }
+  const ids = runs.map(r => r.id);
+  const opts = ids.map((id, i) => `<option value="${id}">#${id}</option>`).join('');
+  let h = '<h3>回归基线</h3><div id="reg-section">加载中…</div>';
+  h += '<h3>Elo 走势（循环赛）</h3>' + renderEloTrend(runs);
+  h += '<h3>A / B 对比</h3><div style="display:flex;gap:8px;align-items:center">' +
+    `<select id="hist-cmp-a" onchange="renderHistCompare()">${opts}</select>` +
+    '<span>vs</span>' +
+    `<select id="hist-cmp-b" onchange="renderHistCompare()">${opts.replace('option value="' + ids[1], 'option selected value="' + ids[1])}</select>` +
+    '</div><div id="hist-compare"></div>';
+  h += '<h3>全部记录</h3><table class="ev"><tr><th>#</th><th>时间(UTC)</th><th>类型</th><th>关键指标</th><th>git</th><th></th></tr>' +
+    runs.map(r => `<tr class="hrow" onclick="renderRunDetail(${r.id})">
+      <td>${r.id}</td><td>${escapeHtml(r.ts_utc || '')}</td>
+      <td><span class="chip-kind k-${escapeHtml(r.kind)}">${escapeHtml(r.kind)}</span></td>
+      <td>${escapeHtml(histMetricPreview(r))}</td>
+      <td class="mono">${escapeHtml(r.git_commit || '-')}</td>
+      <td><a href="/api/eval/export/${r.id}?format=html" target="_blank" onclick="event.stopPropagation()">报告</a></td>
+    </tr>`).join('') + '</table>';
+  el.innerHTML = h;
+  renderHistCompare();
+  loadRegressionSection();
+}
+
+// ---- Regression baseline (stage 3.5) ----
+
+async function loadRegressionSection() {
+  const box = document.getElementById('reg-section');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/eval/regression/latest');
+    const d = await r.json();
+    if (!d.run) {
+      box.innerHTML = '<div class="emp">尚无回归记录 — <button class="btn btn-gn" onclick="runRegression()">运行回归套件</button></div>';
+      return;
+    }
+    const verdict = d.verdict || 'unknown';
+    const badge = verdict === 'green' ? '<span class="badge badge-green">回归通过 ✓</span>'
+      : verdict === 'red' ? '<span class="badge badge-red">回归异常 ✗</span>'
+      : `<span class="badge badge-gray">${escapeHtml(verdict)}</span>`;
+    box.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      ${badge}
+      <span class="mono">#${d.run.id} · ${escapeHtml(d.run.ts_utc || '')}</span>
+      <button class="btn btn-gn" onclick="runRegression()">重跑</button>
+      <button class="btn btn-gy" onclick="saveRegressionBaseline(${d.run.id})">存为基线</button>
+      <a class="btn btn-gy" href="/api/eval/export/${d.run.id}?format=html" target="_blank">报告</a>
+    </div>`;
+  } catch (e) {
+    box.innerHTML = '<div class="bad">回归状态加载失败</div>';
+  }
+}
+
+function runRegression() {
+  const el = document.getElementById('eval-result');
+  el.innerHTML = '<div class="running">启动回归套件（基准 + 固定 seed 自对弈）…</div>';
+  postJob('/api/eval/regression', {}, el)
+    .then(d => startJob(d.job_id, renderRegressionResult));
+}
+
+function renderRegressionResult(res) {
+  const verdict = res.verdict || 'unknown';
+  const badge = verdict === 'green' ? '<span class="badge badge-green">回归通过 ✓</span>'
+    : verdict === 'red' ? '<span class="badge badge-red">回归异常 ✗</span>'
+    : `<span class="badge badge-gray">${escapeHtml(verdict)}</span>`;
+  const breaches = (res.compare && res.compare.breaches) || [];
+  let h = `<h3>回归结果</h3><div>${badge} <span class="mono">对比基线 #${res.baseline_run_id ?? '-'}</span></div>`;
+  if (breaches.length) {
+    h += '<table class="ev"><tr><th>指标</th><th>当前</th><th>基线</th><th>偏差(pp)</th><th>容差</th></tr>' +
+      breaches.map(b => `<tr><td>${escapeHtml(b.metric)}</td><td>${b.current}</td><td>${b.baseline}</td>` +
+        `<td class="bad">${b.delta_pp > 0 ? '+' : ''}${b.delta_pp}</td><td>±${b.tolerance_pp}</td></tr>`).join('') + '</table>';
+  }
+  const bench = (res.metrics && res.metrics.benchmark) || {};
+  h += '<h4>基准指标</h4><table class="ev"><tr><th>模型</th><th>准确率</th></tr>' +
+    Object.entries(bench).map(([m, v]) => `<tr><td>${escapeHtml(m)}</td><td>${v.accuracy}%${v.wilson ? ` <span class="mono">[${v.wilson[0]}–${v.wilson[1]}]</span>` : ''}</td></tr>`).join('') + '</table>';
+  const ms = (res.metrics && res.metrics.match) || {};
+  h += `<h4>自对弈</h4><div class="mono">A ${ms.a_share ?? '-'}% : ${ms.b_share ?? '-'}% B（${ms.n_games ?? 0} 局）</div>`;
+  h += `<div style="margin-top:10px"><button class="btn btn-gy" onclick="renderHistory()">← 返回历史</button>` +
+    `<button class="btn btn-gn" onclick="saveRegressionBaseline(null)">存为基线</button></div>`;
+  document.getElementById('eval-result').innerHTML = h;
+}
+
+async function saveRegressionBaseline(runId) {
+  if (!runId) {
+    // latest regression run
+    try {
+      const r = await fetch('/api/eval/regression/latest');
+      const d = await r.json();
+      runId = d.run && d.run.id;
+    } catch (e) { /* fallthrough */ }
+  }
+  if (!runId) return;
+  await fetch('/api/eval/regression/baseline', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }) });
+  loadRegressionSection();
+}
+
+function histMetricPreview(r) {
+  const s = r.summary || {};
+  if (r.kind === 'benchmark') {
+    const sum = s.summary || [];
+    return sum.map(x => `${x.model_name || x.model} ${x.accuracy}%`).join(' · ') || '-';
+  }
+  if (r.kind === 'match') {
+    return `A ${s.a_wins} : ${s.b_wins} B (${s.n_games} 局)`;
+  }
+  if (r.kind === 'round_robin') {
+    const rk = s.ranking || [];
+    return rk.map(x => `${(x.model && (x.model.label || x.model.id)) || '?'} ${x.rating}`).join(' · ') || '-';
+  }
+  if (r.kind === 'regression') return s.verdict ? ('回归: ' + s.verdict) : '-';
+  return Object.keys(s).slice(0, 3).map(k => `${k}=${JSON.stringify(s[k]).slice(0, 30)}`).join(' · ') || '-';
+}
+
+function renderEloTrend(runs) {
+  // Chronological round_robin runs; one polyline per model (by model_id).
+  const rr = runs.filter(r => r.kind === 'round_robin').slice().reverse();
+  const byModel = {};
+  rr.forEach(r => (r.models || []).forEach(m => {
+    if (m.elo == null) return;
+    (byModel[m.model_id] = byModel[m.model_id] || []).push(m.elo);
+  }));
+  const modelIds = Object.keys(byModel);
+  if (rr.length < 2 || !modelIds.length) {
+    return '<div class="emp">至少两次循环赛后显示 Elo 走势</div>';
+  }
+  const W = 640, H = 160, PAD = 28;
+  const all = modelIds.flatMap(k => byModel[k]);
+  const minY = Math.min(...all) - 5, maxY = Math.max(...all) + 5;
+  const xAt = i => PAD + i * ((W - 2 * PAD) / Math.max(1, rr.length - 1));
+  const yAt = v => H - PAD - (v - minY) * ((H - 2 * PAD) / (maxY - minY));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px;background:#fafbff;border:1px solid #e5e8f0;border-radius:8px">`;
+  for (let g = 0; g <= 2; g++) {
+    const gy = PAD + g * ((H - 2 * PAD) / 2);
+    const gv = Math.round(maxY - g * (maxY - minY) / 2);
+    svg += `<line x1="${PAD}" y1="${gy}" x2="${W - PAD}" y2="${gy}" stroke="#e5e8f0"/>` +
+      `<text x="2" y="${gy + 4}" font-size="10" fill="#889">${gv}</text>`;
+  }
+  modelIds.forEach((k, ki) => {
+    const pts = byModel[k].map((v, i) => `${xAt(i)},${yAt(v)}`).join(' ');
+    const color = HIST_COLORS[ki % HIST_COLORS.length];
+    svg += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2"/>`;
+    svg += `<text x="${W - PAD - 40}" y="${14 + ki * 13}" font-size="11" fill="${color}">${escapeHtml(String(k))}</text>`;
+  });
+  svg += '</svg>';
+  return svg;
+}
+
+async function renderHistCompare() {
+  const aId = document.getElementById('hist-cmp-a')?.value;
+  const bId = document.getElementById('hist-cmp-b')?.value;
+  const box = document.getElementById('hist-compare');
+  if (!aId || !bId || !box) return;
+  try {
+    const [ra, rb] = await Promise.all([
+      fetch('/api/eval/history/' + aId).then(r => r.json()),
+      fetch('/api/eval/history/' + bId).then(r => r.json()),
+    ]);
+    box.innerHTML = compareTable(ra, rb);
+  } catch (e) {
+    box.innerHTML = '<div class="bad">对比加载失败</div>';
+  }
+}
+
+function compareTable(a, b) {
+  const rows = [];
+  const paramRows = new Set([...Object.keys(a.params || {}), ...Object.keys(b.params || {})]);
+  paramRows.delete('models');
+  rows.push('<tr><th colspan="3">参数</th></tr>');
+  rows.push([...paramRows].map(k =>
+    `<tr><td>${escapeHtml(k)}</td><td class="mono">${escapeHtml(JSON.stringify((a.params || {})[k]) ?? '')}</td>` +
+    `<td class="mono">${escapeHtml(JSON.stringify((b.params || {})[k]) ?? '')}</td></tr>`).join(''));
+  rows.push('<tr><th colspan="3">指标</th></tr>');
+  rows.push(`<tr><td>类型</td><td>${escapeHtml(a.kind || '')}</td><td>${escapeHtml(b.kind || '')}</td></tr>`);
+  rows.push(`<tr><td>时间(UTC)</td><td>${escapeHtml(a.ts_utc || '')}</td><td>${escapeHtml(b.ts_utc || '')}</td></tr>`);
+  const am = a.models || [], bm = b.models || [];
+  const maxLen = Math.max(am.length, bm.length);
+  for (let i = 0; i < maxLen; i++) {
+    const x = am[i] || {}, y = bm[i] || {};
+    rows.push(`<tr><td>模型${i + 1}</td>` +
+      `<td>${escapeHtml(String(x.model_id || '-'))} acc ${x.accuracy ?? '-'} elo ${x.elo ?? '-'} 胜负 ${x.wins ?? '-'}/${x.losses ?? '-'}</td>` +
+      `<td>${escapeHtml(String(y.model_id || '-'))} acc ${y.accuracy ?? '-'} elo ${y.elo ?? '-'} 胜负 ${y.wins ?? '-'}/${y.losses ?? '-'}</td></tr>`);
+  }
+  return `<table class="ev"><tr><th>项</th><th>#${a.id}</th><th>#${b.id}</th></tr>${rows.join('')}</table>`;
+}
+
+async function renderRunDetail(id) {
+  const el = document.getElementById('eval-result');
+  el.innerHTML = '<div class="emp">加载详情…</div>';
+  try {
+    const r = await fetch('/api/eval/history/' + id);
+    const run = await r.json();
+    let h = `<div><button class="btn btn-gy" onclick="renderHistory()">← 返回列表</button></div>`;
+    h += `<h3>#${run.id} · ${escapeHtml(run.kind)} · ${escapeHtml(run.ts_utc || '')}</h3>`;
+    h += `<div class="mono" style="font-size:0.78em;color:#666">git ${escapeHtml(run.git_commit || '-')} · seed ${run.seed ?? '-'} · notes ${escapeHtml(run.notes || '-')}</div>`;
+    h += '<h4>参数</h4><pre class="mono" style="font-size:0.75em;white-space:pre-wrap">' + escapeHtml(JSON.stringify(run.params, null, 2)) + '</pre>';
+    h += '<h4>结果摘要</h4><pre class="mono" style="font-size:0.75em;white-space:pre-wrap">' + escapeHtml(JSON.stringify(run.summary, null, 2)) + '</pre>';
+    if ((run.models || []).length) {
+      h += '<h4>模型明细</h4><table class="ev"><tr><th>模型</th><th>准确率</th><th>Elo</th><th>胜/负</th><th>平均</th></tr>' +
+        run.models.map(m => `<tr><td>${escapeHtml(String(m.model_name || m.model_id))}</td>` +
+          `<td>${m.accuracy != null ? m.accuracy + '%' : '-'}</td><td>${m.elo != null ? m.elo : '-'}</td>` +
+          `<td>${m.wins != null ? (m.wins + '/' + m.losses) : '-'}</td><td>${m.avg_ms != null ? m.avg_ms + 'ms' : '-'}</td></tr>`).join('') + '</table>';
+    }
+    h += '<h4>导出</h4><div style="display:flex;gap:8px">' +
+      `<a class="btn btn-gy" href="/api/eval/export/${run.id}?format=json" target="_blank">JSON</a>` +
+      `<a class="btn btn-gy" href="/api/eval/export/${run.id}?format=csv" target="_blank">CSV</a>` +
+      `<a class="btn btn-gy" href="/api/eval/export/${run.id}?format=html" target="_blank">HTML 报告</a></div>`;
+    el.innerHTML = h;
+  } catch (e) {
+    el.innerHTML = '<div class="bad">加载失败: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 init();

@@ -103,3 +103,22 @@ table.ev th { color:#888; font-weight:normal; }
 .dual-solved { background:#27ae60; display:flex; align-items:center; padding:0 8px;
   white-space:nowrap; transition:width 0.45s linear; }
 .dual-skipped { background:#555; display:flex; align-items:center; padding:0 8px; white-space:nowrap; }
+
+/* ---- History panel ---- */
+.hrow { cursor:pointer; }
+.hrow:hover td { background:#22252a; }
+.chip-kind { font-size:0.68em; padding:1px 7px; border-radius:8px; color:#fff; }
+.chip-kind.k-benchmark { background:#2980b9; }
+.chip-kind.k-match { background:#e67e22; }
+.chip-kind.k-round_robin { background:#8e44ad; }
+.chip-kind.k-tuner { background:#16a085; }
+.chip-kind.k-regression { background:#c0392b; }
+.chip-kind.k-generate { background:#555; }
+#hist-compare { margin-top:8px; }
+#eval-result svg text { font-family:monospace; }
+
+/* ---- Regression badges ---- */
+.badge { font-size:0.78em; padding:2px 10px; border-radius:10px; color:#fff; }
+.badge-green { background:#27ae60; }
+.badge-red { background:#c0392b; }
+.badge-gray { background:#555; }
