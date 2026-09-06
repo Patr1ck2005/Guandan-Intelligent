@@ -21,6 +21,7 @@ from ..card import Card, Rank, effective_rank
 from ..combo import Combo, ComboType
 from ..combo_finder import ComboFinder
 from ..combo_compare import can_beat
+from ..constants import STRAIGHT_LEN
 from ..deck import Deck
 from ..game_state import GameState
 from ..rules import RulesEngine
@@ -325,8 +326,8 @@ def _generate_lead_candidates(finder: ComboFinder, hand: Tuple[Card, ...]) -> Li
                     parsed = parser.parse(list(cards[:3]) + list(cs2[:2]))
                     if parsed: add(parsed)
 
-    # Straights: try lengths 5,6,7
-    for length in [5, 6, 7]:
+    # Straights: exactly 5 cards (官方规则 — no variable-length straights)
+    for length in (STRAIGHT_LEN,):
         found_straight = False
         for end in range(length + 2, 15):
             start = end - length + 1

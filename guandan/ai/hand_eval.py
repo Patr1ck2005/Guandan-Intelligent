@@ -175,7 +175,7 @@ def _find_largest_non_bomb(cards: List[Card], parser, level: int) -> Optional[Li
     normal_ranks = sorted(set(c.rank.value for c in normals
                               if c.rank.value <= 14 and c.rank.value != 2))
 
-    for length in range(min(n, 12), 4, -1):  # longest first
+    for length in (5,):  # 官方规则: straight is exactly 5 cards
         for start in range(3, 14 - length + 2):
             end = start + length - 1
             needed = 0

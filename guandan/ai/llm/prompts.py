@@ -49,14 +49,12 @@ Also called "three-of-a-kind".
 ### 4. TRIPLE+PAIR — 3 cards of one rank + 2 cards of a different rank
 The triple and the pair must be of DIFFERENT ranks. Also called "full house" or "三带二".
 
-### 5. STRAIGHT — 5 or more cards of consecutive ranks
-- Must have at least 5 cards. Ranks must be consecutive (e.g. 3-4-5-6-7).
+### 5. STRAIGHT — exactly 5 cards of consecutive ranks (official rule: fixed length)
+- Must be EXACTLY 5 cards. Ranks must be consecutive (e.g. 3-4-5-6-7). A 6-card run of singles is NOT a legal play.
 - Only ranks 3 through A are allowed. 2, jokers, and level-rank-as-face-value cannot be in a straight.
 - Wild cards CAN be used to fill gaps in a straight.
-- A straight of length N+1 beats a straight of length N (same end rank), BUT straights of DIFFERENT lengths are DIFFERENT combo types — a 5-card straight CANNOT beat a 6-card straight.
-  ACTUALLY: all straights are the SAME combo type (STRAIGHT). A longer straight with the same end rank does beat a shorter one. But straights of any length must match the SAME type for comparison — meaning you CAN beat a 5-card straight with a 5-card straight, or a 6-card straight with a 6-card straight. A longer straight of a given type is simply a higher-ranked play of that type.
 
-CORRECTION: In Guandan, STRAIGHT is one combo type regardless of length. To beat a straight, you must play a straight of the SAME length with a HIGHER end rank. Bombs can beat any straight.
+CORRECTION: All straights are exactly 5 cards. To beat a straight, you must play another 5-card straight with a HIGHER ending rank. Bombs can beat any straight.
 
 ### 6. CONSECUTIVE PAIRS — 3 or more consecutive ranks, 2 cards each
 - Minimum: 3 consecutive ranks x 2 cards = 6 cards (e.g. 3-3-4-4-5-5).

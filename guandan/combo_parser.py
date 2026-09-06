@@ -53,7 +53,7 @@ class ComboParser:
             yield self._try_consecutive_triples
         if n >= 6 and n % 2 == 0:
             yield self._try_consecutive_pairs
-        if n >= 5:
+        if n == 5:
             yield self._try_straight
         if n == 5:
             yield self._try_triple_pair
@@ -162,9 +162,13 @@ class ComboParser:
         )
 
     def _try_straight(self, normals: List[Card], wilds: List[Card], wild_count: int) -> Optional[Combo]:
-        """Straight (顺子): 5+ consecutive singles, no 2s or jokers."""
+        """Straight (顺子): exactly 5 consecutive singles, no 2s or jokers.
+
+        官方规则 (江苏竞赛规则): 顺子固定 5 张 — a 6+ card run of singles is
+        NOT a legal combo (it fails to parse → the play is illegal).
+        """
         total = len(normals) + len(wilds)
-        if total < 5:
+        if total != 5:
             return None
         if len(normals) == 0:
             return None  # need at least some normal cards to anchor

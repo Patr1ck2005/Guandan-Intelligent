@@ -14,6 +14,7 @@ from .card import Card, Rank, Suit, effective_rank
 from .combo import Combo, ComboType
 from .combo_parser import ComboParser
 from .combo_compare import can_beat
+from .constants import STRAIGHT_LEN
 
 
 class ComboFinder:
@@ -416,12 +417,15 @@ class ComboFinder:
         return None
 
     def _find_straights(self, results: List[Combo]):
-        """Find all straights/straight flushes (for full enumeration)."""
+        """Find all straights/straight flushes (for full enumeration).
+
+        官方规则: straights are exactly 5 cards — a single length.
+        """
         normal_ranks_set = sorted(set(
             c.rank for c in self.normals
             if c.rank not in (Rank.TWO, Rank.SMALL_JOKER, Rank.BIG_JOKER)
         ))
-        for length in range(5, 13):
+        for length in (STRAIGHT_LEN,):
             for start in range(3, 14 - length + 2):
                 end = start + length - 1
                 needed = 0

@@ -21,7 +21,7 @@ class ComboType(IntEnum):
     PAIR = 2
     TRIPLE = 3
     TRIPLE_PAIR = 4          # 三带二
-    STRAIGHT = 5             # 顺子 (5+ consecutive singles)
+    STRAIGHT = 5             # 顺子 (exactly 5 consecutive singles — fixed length)
     CONSECUTIVE_PAIRS = 6    # 连对/板凳 (3+ consecutive pairs)
     CONSECUTIVE_TRIPLES = 7  # 钢板/飞机 (2+ consecutive triples)
     NORMAL_BOMB = 8          # 普通炸弹 (4-8 of same rank, including wilds)
