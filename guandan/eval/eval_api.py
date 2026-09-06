@@ -7,6 +7,7 @@ Each job reports granular ``progress`` (0-1) and a human-readable ``message``.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -26,14 +27,47 @@ eval_bp = Blueprint('eval_api', __name__)
 # ------------------------------------------------------------------
 
 _jobs: dict = {}
-_JOB_TTL = 30 * 60
+_JOB_TTL = 30 * 60          # terminal jobs are dropped 30 min after finish
+_JOB_LIMIT = 50             # keep at most this many jobs (evict terminal first)
+_DETAIL_LIMIT = 256 * 1024  # live detail larger than this is replaced by a stub
+_STALL_AFTER_S = 10 * 60    # running job without heartbeat for 10 min -> stalled
 
 
 def _cleanup_jobs():
+    """TTL sweep + stall watchdog + cap enforcement.
+
+    Fix vs previous behavior: the TTL used to expire jobs by started_at,
+    which deleted legitimately long-running jobs past 30 min. Now:
+      - terminal jobs expire _JOB_TTL after they finished;
+      - running jobs are never TTL-expired, but a heartbeat older than
+        _STALL_AFTER_S marks them "stalled" (progress_cb refreshes the
+        heartbeat, so an active job always looks fresh);
+      - when the dict exceeds _JOB_LIMIT, oldest terminal jobs are evicted
+        first (running jobs are never evicted).
+    """
     now = time.time()
-    expired = [jid for jid, j in _jobs.items() if now - j["started_at"] > _JOB_TTL]
+    # Stall watchdog
+    for j in _jobs.values():
+        if j["status"] == "running" and \
+                now - (j.get("heartbeat") or j["started_at"]) > _STALL_AFTER_S:
+            j["status"] = "stalled"
+            j["message"] = "疑似停滞（10 分钟无进展）— 可停止后重试"
+    # TTL expiry (terminal only)
+    expired = [jid for jid, j in _jobs.items()
+               if j["status"] not in ("running", "cancelling")
+               and now - (j.get("finished_at") or j["started_at"]) > _JOB_TTL]
     for jid in expired:
         del _jobs[jid]
+    # Cap enforcement: evict oldest terminal jobs first
+    if len(_jobs) > _JOB_LIMIT:
+        terminal = sorted(
+            ((jid, j) for jid, j in _jobs.items()
+             if j["status"] not in ("running", "cancelling")),
+            key=lambda kv: kv[1].get("finished_at") or kv[1]["started_at"])
+        for jid, _j in terminal:
+            if len(_jobs) <= _JOB_LIMIT:
+                break
+            del _jobs[jid]
 
 
 class JobCancelled(JobInterrupted):
@@ -45,7 +79,7 @@ class JobCancelled(JobInterrupted):
     """
 
 
-def _new_job() -> str:
+def _new_job(kind: str = "generic") -> str:
     # Single-active-job policy: CPU-bound games share the GIL, so piling up
     # concurrent jobs starves every one of them (the "stuck" symptom).
     # Starting a new job cancels all still-running ones.
@@ -54,10 +88,12 @@ def _new_job() -> str:
             j["cancel"] = True
             j["status"] = "cancelling"
             j["message"] = "被新任务取代，正在停止…"
+    _cleanup_jobs()
     jid = uuid.uuid4().hex
     _jobs[jid] = {"status": "running", "progress": 0.0, "message": "",
                   "detail": {}, "cancel": False, "result": None, "error": None,
-                  "started_at": time.time()}
+                  "kind": kind, "heartbeat": time.time(),
+                  "started_at": time.time(), "finished_at": None}
     return jid
 
 
@@ -66,11 +102,28 @@ def _set_progress(job_id: str, progress: float, message: str):
     if job:
         job["progress"] = max(0.0, min(1.0, progress))
         job["message"] = message
+        job["heartbeat"] = time.time()
+        # A stalled job that reports progress again is alive again.
+        if job["status"] == "stalled":
+            job["status"] = "running"
 
 
 def _set_detail(job_id: str, detail: dict):
     job = _jobs.get(job_id)
-    if job:
+    if not job:
+        return
+    job["heartbeat"] = time.time()
+    try:
+        size = len(json.dumps(detail, default=str))
+    except (TypeError, ValueError):
+        size = -1
+    if 0 < size > _DETAIL_LIMIT:
+        # Keep the live dashboard light: replace an oversized detail with a
+        # stub (progress bar + message still render fine).
+        keys = sorted(detail.keys()) if isinstance(detail, dict) else None
+        job["detail"] = {"truncated": True, "keys": keys, "approx_bytes": size}
+        job["detail_truncated"] = True
+    else:
         job["detail"] = detail
 
 
@@ -100,6 +153,8 @@ def _spawn(jid: str, fn):
         except Exception as e:
             _jobs[jid]["status"] = "error"
             _jobs[jid]["error"] = str(e)
+        finally:
+            _jobs[jid]["finished_at"] = time.time()
     threading.Thread(target=target, daemon=True).start()
 
 
@@ -148,7 +203,7 @@ def generate_scenarios():
     seed = int(data.get("seed", 0))
     time_limit_ms = int(data.get("time_limit_ms", 5000))
 
-    jid = _new_job()
+    jid = _new_job("generate")
 
     def gen(progress_cb, live_cb):
         scenarios = generate_synthetic_scenarios(
@@ -176,7 +231,7 @@ def benchmark():
     if max_scenarios:
         scenarios = scenarios[:max_scenarios]
 
-    jid = _new_job()
+    jid = _new_job("benchmark")
 
     def run(progress_cb, live_cb):
         return run_scenario_benchmark(scenarios, model_profiles,
@@ -196,7 +251,7 @@ def match():
     agent_timeout_ms = float(data.get("agent_timeout_ms", 75000))
     max_workers = int(data.get("max_workers", 1))
 
-    jid = _new_job()
+    jid = _new_job("match")
 
     def run(progress_cb, live_cb):
         m = run_match(profile_a, profile_b, n_games=n_games, base_seed=base_seed,
@@ -217,7 +272,7 @@ def round_robin():
     agent_timeout_ms = float(data.get("agent_timeout_ms", 75000))
     max_workers = int(data.get("max_workers", 1))
 
-    jid = _new_job()
+    jid = _new_job("round_robin")
 
     def run(progress_cb, live_cb):
         return run_round_robin(profiles, n_games=n_games, base_seed=base_seed,
@@ -243,6 +298,10 @@ def job_status(job_id):
         "detail": job.get("detail") or {},
         "result": job["result"],
         "error": job["error"],
+        "kind": job.get("kind", "generic"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "detail_truncated": bool(job.get("detail_truncated")),
     })
 
 
