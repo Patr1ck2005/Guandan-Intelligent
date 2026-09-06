@@ -76,13 +76,12 @@ class Card:
         """Check if this card is the wild card (万能牌/逢人配) at the given level.
 
         The heart-suit card of the current level rank is the wild card.
-        Jokers cannot be wild cards.
+        Jokers can never be wild: they are Suit.NONE, so the suit check
+        already excludes them (the old is_joker pre-check was redundant).
+        Level is always 2..14 (HIGHEST_LEVEL), so ``rank == level`` can
+        never match a joker rank (15/16) either.
         """
-        return (
-            not self.is_joker
-            and self.suit == Suit.HEARTS
-            and self.rank == level
-        )
+        return self.suit == Suit.HEARTS and self.rank == level
 
     @property
     def display(self) -> str:
@@ -117,10 +116,23 @@ def effective_rank(rank: Rank, level: int) -> int:
     Jokers are shifted up to make room.
 
     Ordering: 3 < 4 < ... < A(14) < 级牌(15) < SJ(16) < BJ(17)
+
+    Cached: pure function of (rank, level) — 15 ranks x 13 levels = 195
+    possible entries; called ~1M times per MC benchmark, so the dict hit
+    beats recomputing branches.
     """
-    v = rank.value
-    if v >= 15:          # jokers: shift up to make room for level card
-        return v + 1      # SJ→16, BJ→17
-    if v == level:
-        return 15          # level card: above A(14), below SJ(16)
-    return v
+    key = (rank, level)
+    cached = _EFFECTIVE_RANK_CACHE.get(key)
+    if cached is None:
+        v = rank.value
+        if v >= 15:          # jokers: shift up to make room for level card
+            cached = v + 1   # SJ→16, BJ→17
+        elif v == level:
+            cached = 15      # level card: above A(14), below SJ(16)
+        else:
+            cached = v
+        _EFFECTIVE_RANK_CACHE[key] = cached
+    return cached
+
+
+_EFFECTIVE_RANK_CACHE: dict = {}

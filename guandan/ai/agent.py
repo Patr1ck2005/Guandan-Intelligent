@@ -327,6 +327,10 @@ def _generate_lead_candidates(finder: ComboFinder, hand: Tuple[Card, ...]) -> Li
                     if parsed: add(parsed)
 
     # Straights: exactly 5 cards (官方规则 — no variable-length straights)
+    # Rank index built once from by_rank (O(1) lookup per rank instead of a
+    # linear scan of normals per window — profiling hotspot at ~90k scans).
+    normals_by_rank = {rank: cards[0] for rank, cards in by_rank.items()
+                       if rank not in (Rank.TWO, Rank.SMALL_JOKER, Rank.BIG_JOKER)}
     for length in (STRAIGHT_LEN,):
         found_straight = False
         for end in range(length + 2, 15):
@@ -334,8 +338,8 @@ def _generate_lead_candidates(finder: ComboFinder, hand: Tuple[Card, ...]) -> Li
             if start < 3: continue
             needed = 0; subset = []
             for r_val in range(start, end + 1):
-                matches = [c for c in normals if c.rank.value == r_val]
-                if matches: subset.append(matches[0])
+                c = normals_by_rank.get(Rank(r_val))
+                if c is not None: subset.append(c)
                 else: needed += 1
             if needed == len(wilds_list) and len(subset) + needed == length:
                 parsed = parser.parse(subset + wilds_list)
@@ -905,13 +909,18 @@ class InformedAgent(BaseAgent):
         my_rounds_saved = rounds_me_before - rounds_me_after
 
         # 2. Can the next active player beat this? (deterministic: we know their hand)
+        # ComboFinder per player: hands don't change within one decision,
+        # so build once per player and reuse across all candidates.
+        finders = {p: ComboFinder(state.hands[p], state.level)
+                   for p in range(4)
+                   if p != player_id and p not in state.finished_positions}
         next_player = next_active_player(state, (player_id + 1) % 4)
         can_be_beaten_by = []
         cannot_be_beaten_by = []
         for p in range(4):
             if p == player_id or p in state.finished_positions:
                 continue
-            if _can_player_beat(state, p, candidate):
+            if _can_player_beat(state, p, candidate, finders[p]):
                 can_be_beaten_by.append(p)
             else:
                 cannot_be_beaten_by.append(p)
@@ -1005,12 +1014,17 @@ def estimate_rounds_given_hand(hand: Tuple[Card, ...], state: GameState,
     return max(0, len(hand) // 2)
 
 
-def _can_player_beat(state: GameState, player_id: int, combo: Combo) -> bool:
-    """Check if a player can beat a given combo (full information)."""
-    from ..combo_finder import ComboFinder
-    from ..combo_compare import can_beat
-    hand = state.hands[player_id]
-    finder = ComboFinder(hand, state.level)
+def _can_player_beat(state: GameState, player_id: int, combo: Combo,
+                     finder: Optional[ComboFinder] = None) -> bool:
+    """Check if a player can beat a given combo (full information).
+
+    ``finder`` may be passed by callers that evaluate many candidates against
+    the same unchanged hand (per-player cache within one decision) — building
+    a ComboFinder was the dominant MC-simulation cost (73k builds per 12
+    decisions in profiling).
+    """
+    if finder is None:
+        finder = ComboFinder(state.hands[player_id], state.level)
     resp = finder.pick_response(combo)
     if resp and can_beat(resp, combo):
         return True
