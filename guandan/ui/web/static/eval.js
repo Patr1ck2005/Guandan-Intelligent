@@ -84,6 +84,10 @@ function setMode(mode) {
   E.mode = mode;
   document.querySelectorAll('.etab').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   document.getElementById('match-pick').style.display = (mode === 'match') ? '' : 'none';
+  // The model picker drives benchmark/match/roundrobin only; tuner uses its
+  // own reference lineup and history is read-only.
+  const modelSect = document.getElementById('model-picker').closest('.sect');
+  if (modelSect) modelSect.style.display = (mode === 'tuner' || mode === 'history') ? 'none' : '';
   if (mode === 'match') renderMatchPicker();
   if (mode === 'history') { renderParamPanel(); renderHistory(); return; }
   renderParamPanel();
@@ -784,12 +788,18 @@ async function renderHistCompare() {
 
 function compareTable(a, b) {
   const rows = [];
-  const paramRows = new Set([...Object.keys(a.params || {}), ...Object.keys(b.params || {})]);
-  paramRows.delete('models');
-  rows.push('<tr><th colspan="3">参数</th></tr>');
-  rows.push([...paramRows].map(k =>
-    `<tr><td>${escapeHtml(k)}</td><td class="mono">${escapeHtml(JSON.stringify((a.params || {})[k]) ?? '')}</td>` +
-    `<td class="mono">${escapeHtml(JSON.stringify((b.params || {})[k]) ?? '')}</td></tr>`).join(''));
+  // Skip params that are missing on BOTH sides (all-empty rows carry no info)
+  const paramRows = [...new Set([...Object.keys(a.params || {}), ...Object.keys(b.params || {})])]
+    .filter(k => k !== 'models' &&
+      ((a.params || {})[k] !== undefined || (b.params || {})[k] !== undefined) &&
+      !((a.params || {})[k] === undefined && (b.params || {})[k] === undefined) &&
+      !(((a.params || {})[k] == null) && ((b.params || {})[k] == null)));
+  if (paramRows.length) {
+    rows.push('<tr><th colspan="3">参数</th></tr>');
+    rows.push(paramRows.map(k =>
+      `<tr><td>${escapeHtml(k)}</td><td class="mono">${escapeHtml(JSON.stringify((a.params || {})[k]) ?? '')}</td>` +
+      `<td class="mono">${escapeHtml(JSON.stringify((b.params || {})[k]) ?? '')}</td></tr>`).join(''));
+  }
   rows.push('<tr><th colspan="3">指标</th></tr>');
   rows.push(`<tr><td>类型</td><td>${escapeHtml(a.kind || '')}</td><td>${escapeHtml(b.kind || '')}</td></tr>`);
   rows.push(`<tr><td>时间(UTC)</td><td>${escapeHtml(a.ts_utc || '')}</td><td>${escapeHtml(b.ts_utc || '')}</td></tr>`);
