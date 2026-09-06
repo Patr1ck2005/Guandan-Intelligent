@@ -226,3 +226,18 @@ CLAUDE.md                # Claude Code 项目文档
 ## 掼蛋规则简介
 
 掼蛋是一种四人结对扑克游戏，使用两副牌（共 108 张）。支持 10 种牌型：单张、对子、三同张、三带二、顺子、连对、钢板、普通炸弹、同花顺、火箭。每局升级制，先打到 A 的团队获胜。红桃级牌为万能牌，可替代 3-A 的任意牌。
+
+## Roadmap（下一阶段候选，非本阶段承诺）
+
+- 单级牌 → 每队各自级牌（官方制完全体）
+- `eval_api.py`（~700 行）按 benchmark / match / history / tuner 拆分为子模块
+- 调参器升级：候选间共享评估的贝叶斯优化 / 更大预算的消耗性搜索
+- 人类还贡横幅的确定性 e2e 触发（当前依赖随机发牌，已标注 skip）
+
+## 验收工具
+
+```bash
+node tools/visual_audit.js   # 4 页视觉检验 + 控制台错误扫描（需 npx playwright install chromium）
+node tools/e2e_ui.js         # 按钮级 e2e：整局对战 / 基准 / 历史 / 回归
+python tools/e2e_demo.py     # API 级端到端：基准→入库→导出→回归→调参
+```
