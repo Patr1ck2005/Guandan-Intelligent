@@ -46,6 +46,7 @@ export DEEPSEEK_API_KEY="sk-your-key-here"
 - **进贡/还贡/抗贡**（`guandan/tribute.py`）：单下末游进贡、双下双贡；贡最大非级牌（级牌不可进贡）；持一对大王抗贡（全免，头游先出）；收贡方还贡任意一张
 - **级牌归属**：下一局级牌 = 上一局头游队伍的级别；先出权按进贡规则（进贡者先出 / 双下大贡先出 / 抗贡头游先出）
 - **顺子固定 5 张**（`constants.STRAIGHT_LEN`）：官方制顺子恰好 5 张，6 张以上连张不再是合法牌型；连对（≥3 对）与钢板（≥2 组）保持官方下限
+- **确定性与可复现**：自对弈每局使用独立 RNG（发牌 + 首出 + agent 全局随机），同 seed 同结果；`Game(..., rng=...)` 可注入
 - 已知简化：两队共用一张级牌（官方制为每队各自级牌，见 roadmap）
 
 ## 项目结构
@@ -79,7 +80,7 @@ guandan/
 │   ├── sampler.py       # 手牌采样（Random / Constrained）
 │   ├── registry.py      # 模型注册 + Schema 生成 + 工厂函数
 │   ├── schema.py        # SchemaBuilder（前端自动发现）
-│   ├── params.py        # AIParams 可配置参数
+│   ├── params.py        # AIParams 可配置参数（含 2v2 队友/对手建模权重）
 │   ├── ismcts.py        # ISMCTS 树搜索决策器
 │   ├── mc_decider.py    # 蒙特卡洛决策器
 │   ├── models/
@@ -97,6 +98,15 @@ guandan/
 │       └── agent.py     # LLMAgent（BaseAgent 实现）
 ├── arena/
 │   └── scenarios.py     # Arena 场景库（12 个推理场景）
+├── eval/                # Eval Lab（评估实验室）
+│   ├── eval_api.py      # 评估任务 API（benchmark/match/RR/tuner/regression）
+│   ├── selfplay.py      # 自对弈（多进程可选，per-seed 确定性）
+│   ├── scenario_bank.py # 场景题库（策划 + 合成）
+│   ├── metrics.py       # 准确率/Wilson 置信区间/agreement/regret
+│   ├── elo.py           # Elo 排名（K=32）
+│   ├── store.py         # SQLite 历史库（data/eval_history.db）
+│   ├── regression.py    # 回归基线套件（红/绿徽章）
+│   └── tuner.py         # AIParams 自动调参（随机搜索 + 预算硬上限）
 └── ui/
     ├── interactive.py   # 交互式对局接口（step-driven）
     └── web/
@@ -119,11 +129,19 @@ guandan/
                 └── store.js     # 状态存储
 
 tests/
-├── test_core.py         # 核心引擎测试
-├── test_ai.py           # AI 决策测试
-├── test_llm_agent.py    # LLM Agent 模块测试（20 项）
-└── arena/
-    └── scenarios.py     # 场景定义测试
+├── test_core.py             # 核心引擎测试（含固定 5 张顺子边界矩阵）
+├── test_ai.py               # AI 决策测试
+├── test_llm_agent.py        # LLM Agent 模块测试（mock HTTP）
+├── test_tribute.py          # 进贡/还贡/抗贡 + 全局集成
+├── test_eval.py             # 评估指标/自对弈/题库
+├── test_eval_jobs.py        # 任务管理（上限/心跳/停滞/截断）
+├── test_eval_store.py       # SQLite 历史库
+├── test_eval_history_api.py # 历史 API + 导出
+├── test_selfplay_mp.py      # 多进程自对弈（确定性/崩溃隔离）
+├── test_teammate_heuristics.py # 2v2 队友权重
+├── test_opp_modeling.py     # 公开信息对手建模
+├── test_regression.py       # 回归基线对比逻辑
+└── test_tuner.py            # 自动调参器
 
 config.json              # AI 模型参数配置（Schema 驱动）
 CLAUDE.md                # Claude Code 项目文档
@@ -174,6 +192,28 @@ CLAUDE.md                # Claude Code 项目文档
 | `/api/arena/sim/step` | POST | 执行一步 |
 | `/api/arena/sim/analyze` | POST | 分析当前模拟状态 |
 | `/api/arena/check_combo` | POST | 校验牌型合法性 |
+
+### Eval Lab API
+
+| 端点 | 方法 | 说明 |
+| --- | --- | --- |
+| `/api/eval/models` | GET | 可用模型 schema |
+| `/api/eval/scenarios` | GET | 场景题库（过滤） |
+| `/api/eval/scenarios/generate` | POST | 生成合成场景（精确解标注） |
+| `/api/eval/benchmark` | POST | 场景基准（含 Wilson 95% CI） |
+| `/api/eval/match` | POST | 自对弈（max_workers>1 走多进程） |
+| `/api/eval/round_robin` | POST | 循环赛 Elo |
+| `/api/eval/jobs/<id>` | GET | 任务进度（心跳/停滞检测） |
+| `/api/eval/jobs/<id>/cancel` | POST | 取消任务 |
+| `/api/eval/history` | GET | 历史记录（SQLite 持久化） |
+| `/api/eval/history/<id>` | GET | 单条历史详情 |
+| `/api/eval/export/<id>` | GET | 报告导出（json/csv/html） |
+| `/api/eval/regression` | POST | 回归套件（对比基线，红/绿判定） |
+| `/api/eval/regression/latest` | GET | 最近回归结果徽章 |
+| `/api/eval/regression/baseline` | POST | 保存当前为基线 |
+| `/api/eval/tuner` | POST | AIParams 自动调参（预算硬上限） |
+| `/api/eval/tuner/best` | GET | 最近调参最优结果 |
+| `/api/eval/tuner/apply` | POST | 将最优权重写入 config.json（返回 diff） |
 
 ## 技术栈
 

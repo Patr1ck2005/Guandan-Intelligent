@@ -27,22 +27,31 @@ Game Engine (game.py)       — round/trick loop, ThreadPoolExecutor timeout
   ├─ GameState (dataclass)  — full snapshot: hands, table, played, finished
   ├─ RulesEngine            — play validation gate
   ├─ tribute.py             — 进贡/还贡/抗贡 (post-round tribute flow)
-  └─ TableState             — per-trick state (current combo, pass count, history)
+  ├─ TableState             — per-trick state (current combo, pass count, history)
+  └─ ActionLog              — per-round public action memory, passed into PlayerView
 
 AI System (guandan/ai/)     — layered, pluggable via registry + config.json
   Layer 0: hand_eval.py, action_log.py   — analysis + opponent tracking
   Layer 1: candidate_enum.py, combo_finder — candidate generation
-  Layer 2: scorer.py, models/*           — heuristic scoring
+  Layer 2: scorer.py, models/*           — heuristic scoring (teammate_context_score = 2v2 public-info heuristics)
   Layer 3: agent.py, mc_decider.py, ismcts.py — decision agents
-  Layer 4: registry.py, params.py        — config + factory
+  Layer 4: registry.py, params.py        — config + factory (AIParams includes teammate/opp-model weights, default 0)
 
-LLM Module (guandan/ai/llm/)  — NEW: end-to-end LLM-driven decisions
+Eval Lab (guandan/eval/)    — benchmark / selfplay / Elo / tuner / regression
+  eval_api.py               — job API (heartbeat, stall watchdog, detail caps, auto-persist)
+  selfplay.py               — matches; max_workers>1 = ProcessPoolExecutor, per-seed deterministic
+  store.py                  — SQLite history (data/eval_history.db, WAL)
+  regression.py             — standard suite vs saved baseline (±10pp acc / ±15pp win)
+  tuner.py                  — AIParams random search + refinement, hard budget
+  metrics.py, elo.py, scenario_bank.py
+
+LLM Module (guandan/ai/llm/)  — end-to-end LLM-driven decisions
   config.py → client.py → prompts.py → parser.py → agent.py
 
 Web UI (guandan/ui/web/)
-  app.py (Flask routes) + arena_api.py (Flask blueprint)
+  app.py (Flask routes) + arena_api.py + eval_api.py (Flask blueprints)
   templates/ (Jinja2 HTML), static/ (vanilla JS + CSS)
-  static/lib/ (api.js, card.js, constants.js, store.js)
+  static/lib/ (api.js, card.js, constants.js, store.js), eval.js/eval.css (Eval Lab)
 ```
 
 ## Key Conventions
@@ -119,6 +128,27 @@ Tests use `Card.from_id(n)` to construct hands. Mock external services (HTTP) in
 | `/api/arena/sim/step` | POST | Execute one step |
 | `/api/arena/sim/analyze` | POST | Analyze current sim state |
 | `/api/arena/check_combo` | POST | Validate card combination |
+
+### Eval Lab (`eval_api.py`)
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/eval/models` | GET | Model schema for eval configs |
+| `/api/eval/scenarios` | GET | Scenario bank (filterable) |
+| `/api/eval/scenarios/generate` | POST | Generate synthetic scenarios (exact-solver labels) |
+| `/api/eval/benchmark` | POST | Scenario benchmark (Wilson 95% CI in summary) |
+| `/api/eval/match` | POST | Self-play match (`max_workers>1` = multiprocess) |
+| `/api/eval/round_robin` | POST | Round-robin with Elo |
+| `/api/eval/jobs/<id>` | GET | Job status (heartbeat/stall watchdog/detail caps) |
+| `/api/eval/jobs/<id>/cancel` | POST | Cancel job (JobCancelled → JobInterrupted) |
+| `/api/eval/history` | GET | Persisted runs (SQLite store) |
+| `/api/eval/history/<id>` | GET | One run detail |
+| `/api/eval/export/<id>` | GET | Export report (`format=json|csv|html`) |
+| `/api/eval/regression` | POST | Standard regression suite vs saved baseline |
+| `/api/eval/regression/latest` | GET | Latest regression verdict badge |
+| `/api/eval/regression/baseline` | POST | Mark a run as the baseline |
+| `/api/eval/tuner` | POST | AIParams auto-tuner (hard budget) |
+| `/api/eval/tuner/best` | GET | Latest tuner best result |
+| `/api/eval/tuner/apply` | POST | Write best weights into config.json (returns diff) |
 
 ## Important Notes
 
