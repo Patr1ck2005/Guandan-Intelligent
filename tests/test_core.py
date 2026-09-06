@@ -339,20 +339,19 @@ def test_normal_bomb_cannot_beat_sf():
 
 
 def test_sf_beats_plain_straight_and_sequences():
-    """SF beats any non-bomb: plain straight (even longer/higher), 连对."""
+    """SF beats any non-bomb: plain straight (even higher), 连对."""
     parser = ComboParser(level=2)
     sf = _sf(Suit.CLUBS, 3)  # C3-C7
-    # longer, higher plain straight 8-K (6 cards, mixed suits → not SF)
+    # higher plain straight 8-Q (5 cards, mixed suits → not SF)
     ids = [_find_cards(Rank(8), suit=Suit.HEARTS, count=1)[0],
            _find_cards(Rank(9), suit=Suit.DIAMONDS, count=1)[0],
            _find_cards(Rank(10), suit=Suit.CLUBS, count=1)[0],
            _find_cards(Rank(11), suit=Suit.SPADES, count=1)[0],
-           _find_cards(Rank(12), suit=Suit.HEARTS, count=1)[0],
-           _find_cards(Rank(13), suit=Suit.DIAMONDS, count=1)[0]]
-    long_straight = parser.parse(_cards(ids))
-    assert long_straight.combo_type == ComboType.STRAIGHT
-    assert long_straight.length == 6
-    assert can_beat(sf, long_straight)
+           _find_cards(Rank(12), suit=Suit.HEARTS, count=1)[0]]
+    plain_straight = parser.parse(_cards(ids))
+    assert plain_straight.combo_type == ComboType.STRAIGHT
+    assert plain_straight.length == 5
+    assert can_beat(sf, plain_straight)
     # 连对 3-8 (6 pairs) — higher than SF main rank 7
     cp_ids = []
     for rv in range(3, 9):
@@ -361,6 +360,46 @@ def test_sf_beats_plain_straight_and_sequences():
     assert cp.combo_type == ComboType.CONSECUTIVE_PAIRS
     assert can_beat(sf, cp)
     print("  PASS test_sf_beats_plain_straight_and_sequences")
+
+
+def test_straight_fixed_length_rejects_longer_runs():
+    """官方规则: straights are EXACTLY 5 cards — 6/7-card runs of singles are illegal."""
+    parser = ComboParser(level=2)
+    # 6-card run 3-8 (mixed suits → not a 连对/钢板)
+    ids = [_find_cards(Rank(rv), suit=Suit((rv - 3) % 4), count=1)[0]
+           for rv in range(3, 9)]
+    assert parser.parse(_cards(ids)) is None, "6-card straight must be illegal"
+    # 7-card run 3-9
+    ids7 = ids + [_find_cards(Rank(9), suit=Suit.HEARTS, count=1)[0]]
+    assert parser.parse(_cards(ids7)) is None, "7-card straight must be illegal"
+    # 8-card run 3-10 — also must not silently become anything legal
+    ids8 = ids7 + [_find_cards(Rank(10), suit=Suit.DIAMONDS, count=1)[0]]
+    assert parser.parse(_cards(ids8)) is None, "8-card straight must be illegal"
+    print("  PASS test_straight_fixed_length_rejects_longer_runs")
+
+
+def test_straight_fixed_length_finder_and_agent():
+    """ComboFinder.find_all and lead candidates emit only 5-card straights."""
+    # Hand spanning 3-9, MIXED suits (all-one-suit 5-windows would parse as
+    # straight flush via the parser cascade). Contains overlapping 5-runs.
+    suits_cycle = [Suit.CLUBS, Suit.CLUBS, Suit.CLUBS, Suit.CLUBS,
+                   Suit.HEARTS, Suit.HEARTS, Suit.HEARTS]
+    ids = [_find_cards(Rank(rv), suit=suits_cycle[rv - 3], count=1)[0]
+           for rv in range(3, 10)]
+    hand = tuple(_cards(ids))
+    finder = ComboFinder(hand, level=2)
+    all_combos = finder.find_all()
+    straights = [c for c in all_combos if c.combo_type == ComboType.STRAIGHT]
+    assert straights, "hand 3-9 (mixed suits) should contain 5-card straights"
+    for c in straights:
+        assert c.length == 5, f"straight must be 5 cards, got {c.length}"
+    # Agent lead candidates: no non-5 straight may appear
+    from guandan.ai.agent import _generate_lead_candidates
+    candidates = _generate_lead_candidates(finder, hand)
+    for c in candidates:
+        if c.combo_type == ComboType.STRAIGHT:
+            assert c.length == 5, f"lead candidate straight must be 5 cards, got {c.length}"
+    print("  PASS test_straight_fixed_length_finder_and_agent")
 
 
 def test_sf_vs_sf_higher_rank_wins():
@@ -570,6 +609,40 @@ def test_edge_straight_with_wild_fills_two():
     assert combo.combo_type == ComboType.STRAIGHT
     assert combo.main_rank == Rank.SEVEN
     print("  PASS test_edge_straight_with_wild_fills_two")
+
+
+def test_straight_boundary_boundaries():
+    """Fixed-5 straight boundary matrix: A-top ok, 2-bottom illegal, sequences unaffected."""
+    parser = ComboParser(level=2)
+    # 10-J-Q-K-A: legal (highest straight)
+    ids = [_find_cards(Rank(rv), suit=Suit((rv - 10) % 4), count=1)[0]
+           for rv in range(10, 15)]
+    combo = parser.parse(_cards(ids))
+    assert combo is not None and combo.combo_type == ComboType.STRAIGHT
+    assert combo.main_rank == Rank.A and combo.length == 5
+    # J-Q-K-A+2: rank 2 can never join a straight
+    ids2 = [_find_cards(Rank(rv), suit=Suit((rv - 11) % 4), count=1)[0]
+            for rv in range(11, 15)]
+    ids2.append(_find_cards(Rank.TWO, count=1)[0])
+    combo2 = parser.parse(_cards(ids2))
+    assert combo2 is None or combo2.combo_type != ComboType.STRAIGHT
+    # 5-card windows inside a 6-run are still individually legal (3-7, 4-8)
+    six_run = [_find_cards(Rank(rv), suit=Suit((rv - 3) % 4), count=1)[0]
+               for rv in range(3, 9)]
+    w1 = parser.parse(_cards(six_run[:5]))
+    w2 = parser.parse(_cards(six_run[1:]))
+    assert w1 is not None and w1.combo_type == ComboType.STRAIGHT and w1.length == 5
+    assert w2 is not None and w2.combo_type == ComboType.STRAIGHT and w2.length == 5
+    # 连对/钢板 are NOT affected by the straight fix
+    cp_ids = []
+    for rv in range(3, 6):
+        cp_ids.extend(_find_cards(Rank(rv), count=2))
+    cp = parser.parse(_cards(cp_ids))
+    assert cp is not None and cp.combo_type == ComboType.CONSECUTIVE_PAIRS
+    steel = _find_cards(Rank(6), count=3) + _find_cards(Rank(7), count=3)
+    ct = parser.parse(_cards(steel))
+    assert ct is not None and ct.combo_type == ComboType.CONSECUTIVE_TRIPLES
+    print("  PASS test_straight_boundary_boundaries")
 
 
 def test_edge_all_wild_pair():
