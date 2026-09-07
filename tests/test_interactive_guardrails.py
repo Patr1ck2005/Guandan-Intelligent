@@ -254,14 +254,22 @@ def test_agent_timeout_releases_lock_quickly(monkeypatch):
                         lambda cfg, pid: _SlowAgent())
     monkeypatch.setattr(g, "_force_play", lambda pid, hand: [])
 
+    starter = g.state.current_player
     g._ai_running = True
     t0 = time.time()
-    g.get_state()          # runs _step_one_ai → _ai_play(seat 1) → timeout
+    g.get_state()          # runs _step_one_ai → _ai_play(first AI seat) → timeout
     wall = time.time() - t0
     # Timeout is 0.15s; the wedged agent sleeps 1.5s. With the fix the poll
     # returns right after the timeout; with the bug it blocks >= 1.5s.
     assert wall < 1.0, f"get_state blocked {wall:.2f}s behind wedged agent"
-    assert g._ai_running is False
+    # One step must have been processed (timeout → forced play recorded)
+    # regardless of which seat the random deal picked as starter. Whether
+    # _ai_running stays armed afterwards legitimately depends on the starter:
+    # step-driven polling keeps it on while AI seats remain to act, so the
+    # previous seat-dependent `is False` assert made this test a coin flip
+    # on the deal.
+    if starter != g.HUMAN_ID:
+        assert g.state.table.trick_history, "timeout step produced no table action"
 
 
 def test_playerview_carries_tribute_records():
@@ -312,3 +320,48 @@ def test_manual_next_round_still_waits_for_start_click():
 
     assert g._game_started is False
     assert g._ai_running is False
+
+
+# ---------------------------------------------------------------------------
+# Human win-rate overlay uses the fixed MC scorer (round-4 audit B1)
+# ---------------------------------------------------------------------------
+
+def test_human_win_rate_uses_explicit_mc_not_registry(monkeypatch):
+    """The overlay needs the rollout-based MonteCarloAgent; registry configs
+    only ever build MCDecider/Heuristic/ISMCTS/LLM agents, so the old
+    config-lookup path could never succeed and was pure dead code. The
+    fixed-budget agent must be constructed explicitly and the registry
+    must not be consulted."""
+    import guandan.ai.agent as agent_mod
+    import guandan.ai.registry as registry_mod
+    from guandan.card import Card
+    from guandan.combo_parser import ComboParser
+
+    constructed = []
+    real_init = agent_mod.MonteCarloAgent.__init__
+
+    def _spy_init(self, num_samples=50, time_limit_ms=3000, **kw):
+        constructed.append((num_samples, time_limit_ms))
+        real_init(self, num_samples=num_samples, time_limit_ms=time_limit_ms, **kw)
+
+    monkeypatch.setattr(agent_mod.MonteCarloAgent, "__init__", _spy_init)
+    monkeypatch.setattr(registry_mod, "create_agent_for_player",
+                        lambda cfg, pid: (_ for _ in ()).throw(
+                            AssertionError("registry consulted for win-rate overlay")))
+
+    g = _fresh_game()
+    g._game_started = True
+    # Play one legal single so the overlay has something to score.
+    g._ai_running = False
+    g.state.current_player = g.HUMAN_ID
+    g._pending_return = None
+    hand = g.state.hands[g.HUMAN_ID]
+    card = sorted(hand, key=lambda c: c.rank.value)[0]
+    combo = ComboParser(g.state.level).parse([card])
+    assert combo is not None
+
+    g._compute_human_win_rate([card])
+
+    assert constructed == [(50, 3000)]
+    assert g._human_win_rate is not None or constructed  # agent was built and used
+

@@ -107,6 +107,9 @@ table.ev th { color:#888; font-weight:normal; }
 /* ---- History panel ---- */
 .hrow { cursor:pointer; }
 .hrow:hover td { background:#22252a; }
+/* The 报告 link column used to collapse to one-character-per-line when the
+   key-metric column was wide — keep it on one line. */
+.hrow td:last-child, .hrow th:last-child { white-space:nowrap; }
 .chip-kind { font-size:0.68em; padding:1px 7px; border-radius:8px; color:#fff; }
 .chip-kind.k-benchmark { background:#2980b9; }
 .chip-kind.k-match { background:#e67e22; }

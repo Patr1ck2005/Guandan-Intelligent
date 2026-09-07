@@ -608,15 +608,20 @@ class InteractiveGame:
         return []
 
     def _compute_human_win_rate(self, cards: list):
-        """MC to score the human's last action, using global config params."""
+        """MC-score the human's last action for the win-rate overlay.
+
+        Deliberately NOT the configured decider: registry configs build
+        MCDecider/HeuristicAgent/ISMCTS/LLM agents — none of them is the
+        rollout-based MonteCarloAgent this overlay needs, so the config is
+        irrelevant here (the old config-lookup + isinstance fallback was a
+        dead path that always ended at bare defaults). Fixed sampling
+        budget keeps the per-move UI latency bounded.
+        """
         try:
             from ..ai.player_view import PlayerView
             from ..ai.agent import MonteCarloAgent
             from ..combo_parser import ComboParser
-            from ..ai.registry import create_agent_for_player
-            agent = create_agent_for_player(self.config, self.HUMAN_ID)
-            if not isinstance(agent, MonteCarloAgent):
-                agent = MonteCarloAgent()
+            agent = MonteCarloAgent(num_samples=50, time_limit_ms=3000)
             view = PlayerView(self.state, self.HUMAN_ID, self.action_log,
                               tribute_records=self._tribute_records)
             if not cards:

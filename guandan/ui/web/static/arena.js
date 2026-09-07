@@ -546,7 +546,10 @@ function buildTable(containerId, st, opts) {
 
 function toggleArenaCard(cid) {
   if (P.selected.has(cid)) P.selected.delete(cid); else P.selected.add(cid);
-  document.querySelectorAll(`.card[data-cid="${cid}"]`).forEach(el => {
+  // Scoped to the P-tab table: the C-tab runs its own live sim (with its
+  // own toggleArenaCardC scope), and the global selector used to highlight
+  // the same card id over there too.
+  document.querySelectorAll(`#tbl-p .card[data-cid="${cid}"]`).forEach(el => {
     el.classList.toggle('selected', P.selected.has(cid));
   });
 }

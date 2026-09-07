@@ -213,9 +213,19 @@ class ScenarioBank:
                 })
             fd, tmp = __import__("tempfile").mkstemp(
                 dir=os.path.dirname(path), suffix=".json.tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(items, f, ensure_ascii=False)
-            os.replace(tmp, path)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(items, f, ensure_ascii=False)
+                os.replace(tmp, path)
+            except BaseException:
+                # Best-effort persistence: a crash between mkstemp and
+                # os.replace used to strand an orphan *.json.tmp in data/
+                # forever (two were found by the round-4 audit).
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         except Exception:
             pass  # best-effort persistence
 
