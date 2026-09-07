@@ -149,22 +149,23 @@ def test_tuner_apply_endpoint(tmp_path, monkeypatch):
     from guandan.eval import store
     from guandan.ui.web.app import app
 
-    # temp config.json + temp store
-    cfg = {"decider": {"model_params": {"blind": {"efficiency_weight": 20.0}}},
-           "inner_model": {"model_params": {"blind": {}}}}
-    cfg_path = tmp_path / "config.json"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    store.reset_for_tests(str(tmp_path / "db.sqlite"))
-
-    monkeypatch.setattr("guandan.eval.eval_api.os.path", os.path)
-    # point the endpoint's config path at tmp by patching dirname chain:
-    # the endpoint computes project root from __file__; simplest is to run
-    # it for real but restore config.json afterwards if it exists.
+    # temp store (the DB is redirected); the endpoint itself writes the
+    # REAL project config.json, so seed it with a known baseline instead of
+    # depending on whatever the production config happens to contain —
+    # a concurrent e2e run swaps deciders in that same file and used to
+    # make the expected diff values a coin flip.
+    cfg = {"decider": {"default_model": "blind",
+                       "model_params": {"blind": {"efficiency_weight": 20.0}}},
+           "inner_model": {"model_params": {"blind": {}}},
+           "enumerator": {"model_params": {}}}
     real_cfg = os.path.join(os.getcwd(), "config.json")
     backup = None
     if os.path.exists(real_cfg):
         with open(real_cfg, "r", encoding="utf-8") as f:
             backup = f.read()
+    with open(real_cfg, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    store.reset_for_tests(str(tmp_path / "db.sqlite"))
 
     app.config["TESTING"] = True
     try:
@@ -180,7 +181,7 @@ def test_tuner_apply_endpoint(tmp_path, monkeypatch):
                 new_cfg = json.load(f)
             assert new_cfg["decider"]["model_params"]["blind"]["efficiency_weight"] == 33.0
             assert new_cfg["inner_model"]["model_params"]["blind"]["support_teammate_lead"] == 5.0
-        print("  PASS tuner apply (real config.json written + restored)")
+        print("  PASS tuner apply (seeded config.json written + restored)")
     finally:
         if backup is not None:
             with open(real_cfg, "w", encoding="utf-8") as f:
