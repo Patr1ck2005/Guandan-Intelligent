@@ -198,6 +198,27 @@ def test_ai_params_from_dict_skips_none():
     assert p.efficiency_weight == 10.0  # explicit value kept
 
 
+def test_set_auto_play_resolves_pending_tribute_return():
+    """Auto-play owns the human seat: a pending tribute return is resolved
+    automatically (previously the toggle deadlocked — refused while the
+    round could only proceed after the return)."""
+    from guandan.card import Card
+
+    g = _fresh_game()
+    g._game_started = True
+    paid = Card.from_id(52)  # small joker as the tribute card
+    g._pending_return = SimpleNamespace(
+        paid_card=paid, receiver=0, payer=1, returned_card=None)
+    hand = tuple(Card.from_id(i) for i in (0, 13, 26))  # C2, C3, C4-ish
+    g.state.hands = (hand,) + g.state.hands[1:]
+
+    state = g.set_auto_play(True)
+
+    assert state["error"] is False
+    assert g._pending_return is None
+    assert g._auto_play is True
+
+
 def test_game_lock_serializes_public_api():
     g = _fresh_game()
     acquired = g._lock.acquire(timeout=1.0)

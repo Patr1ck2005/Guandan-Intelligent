@@ -103,10 +103,12 @@ class InteractiveGame:
 
         Returns the state payload; on refusal it carries error=True plus a
         message. Auto-play is refused while a round is over (the 下一局
-        button owns the transition), while the game is over, while a
-        tribute return is pending, or before the game started — arming the
-        AI loop in those states used to re-run settlement or bypass the
-        tribute exchange.
+        button owns the transition) and before the game started — arming
+        the AI loop in those states used to re-run settlement.
+
+        A pending tribute return no longer deadlocks the toggle: in
+        auto-play the human seat is AI-driven anyway, so the return card is
+        chosen automatically (lowest regular card) before arming.
         """
         with self._lock:
             if enabled:
@@ -115,20 +117,33 @@ class InteractiveGame:
                     err = "游戏已结束"
                 elif self.state is not None and len(self.state.finished_positions) >= 3:
                     err = "本局已结束，请先点「下一局」"
-                elif self._pending_return is not None:
-                    err = "请先完成还贡再开启自动对局"
                 elif not self._game_started:
                     err = "请先点击「开始游戏」"
                 if err:
                     state = self._build_state(error=err)
                     state["auto_play"] = False
                     return state
+                if self._pending_return is not None:
+                    self._auto_resolve_tribute_return()
             self._auto_play = bool(enabled)
-            if self._auto_play and self.state is not None and not self._game_over:
+            if self._auto_play and self.state is not None and not self._game_over \
+                    and self._pending_return is None:
                 self._ai_running = True
             state = self._build_state()
             state["auto_play"] = self._auto_play  # None-state payload lacks it
             return state
+
+    def _auto_resolve_tribute_return(self):
+        """Complete the human's pending tribute return with an AI-chosen
+        card (lowest regular card; wilds/jokers kept for last). Only used
+        when auto-play takes over the human seat."""
+        ex = self._pending_return
+        hand = self.state.hands[self.HUMAN_ID]
+        regular = sorted(
+            (c for c in hand if not c.is_wild(self.state.level) and not c.is_joker),
+            key=lambda c: (c.rank.value, c.suit.value))
+        card = regular[0] if regular else sorted(hand, key=lambda c: c.rank.value)[0]
+        self._submit_tribute_return_locked([card.id])
 
     def play_cards(self, card_ids: List[int]) -> dict:
         with self._lock:
