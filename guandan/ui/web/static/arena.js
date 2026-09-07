@@ -185,16 +185,14 @@ const MODEL_INFO = {
   },
   ismcts: {
     name: 'IS-MCTS 树搜索',
-    desc: '信息集MC树搜索：构建UCB搜索树，每次迭代经历选择→展开→模拟→回传四阶段。',
-    flow: `1. 初始化根节点（当前状态）
+    desc: 'UCB 候选评审：对每个候选模拟计胜率，按访问次数选优。（如实说明：当前实现为 1 层 UCB 评审，未做深层树展开，行为接近逐候选 MC。）',
+    flow: `1. 枚举根候选（由enumerator控制）并全部加入根节点
 2. 循环 max_iterations 次（或超时）：
-   a. 选择(Select): 从根节点沿UCB公式下行到叶节点
-      UCB = wins/visits + ucb_c × √(ln(parent_visits)/visits)
-   b. 展开(Expand): 随机选一个未尝试的动作，创建子节点
-   c. 模拟(Simulate): 用内层模型从子节点模拟至终局
-   d. 回传(Backpropagate): 将结果沿路径向上更新wins/visits
-3. 返回根节点各子节点的胜率统计
-4. 选访问次数最多的子节点作为推荐`,
+   a. 选择(Select): 按UCB公式挑一个候选子节点
+   b. 模拟(Simulate): 用内层模型从该候选模拟至终局
+   c. 回传(Backpropagate): 更新该候选的 wins/visits
+3. 返回根候选的胜率统计
+4. 选访问次数最多的候选作为推荐`,
     params: [
       {key:'max_iterations', label:'最大迭代', type:'int', dflt:500, step:50},
       {key:'time_limit_ms', label:'超时限制(ms)', type:'int', dflt:10000, step:1000},
@@ -211,7 +209,7 @@ const MODEL_INFO = {
 2. 取前 top_n 个候选返回`,
     params: [
       {key:'top_n', label:'保留候选数', type:'int', dflt:5, step:1},
-      {key:'pre_scorer', label:'预评分器', type:'select', dflt:'blind', opts:{blind:'Blind',informed:'Informed',round:'Round'}},
+      {key:'pre_scorer', label:'预评分器', type:'select', dflt:'blind', opts:{blind:'Blind'}},
     ]
   },
   memory: {
@@ -424,11 +422,14 @@ async function init() {
   const firstP = scens.find(s=>s.category==='deduction') || scens[0];
   if (firstP) selP(firstP.id);
 
-  // Tab 2 — 真实牌桌：不确定采样 + 残局求解 + 开局评估
+  // Tab 2 — 真实牌桌：目前题库只有 deduction 场景；类别下拉改为展示
+  // 后端真实存在的类别（空壳类别曾让场景列表恒「无场景」、基准恒「无结果」）。
   const ts = document.getElementById('tcat');
-  ts.innerHTML = cats.filter(c=>c==='sampling'||c==='endgame'||c==='opening').map(c=>`<option value="${c}">${CCN[c]||c}</option>`).join('');
-  ts.value='sampling'; loadScT(); setProfsT();
-  const firstT = scens.find(s=>s.category==='sampling') || scens[0];
+  const tCats = cats.length ? cats : ['deduction'];
+  ts.innerHTML = tCats.map(c=>`<option value="${c}">${CCN[c]||c}</option>`).join('');
+  ts.value = tCats.includes('sampling') ? 'sampling' : tCats[0];
+  T.cat = ts.value; loadScT(); setProfsT();
+  const firstT = scens.find(s=>s.category===ts.value) || scens[0];
   if (firstT) selT(firstT.id);
 
   document.getElementById('persp-tabs').innerHTML = [0,1,2,3].map(i=>`<button class="ptab${i===0?' on':''}" onclick="swPersp(${i})">${PN[i]}</button>`).join('');
@@ -1185,7 +1186,7 @@ function poolClick(cid, event) {
   renderCustomAll();
 }
 
-function customFocus(pid) {
+function customFocus(pid, event) {
   event.stopPropagation();
   autoClearEmptyPlay();
   validatePlayCombos();
@@ -1197,7 +1198,7 @@ function customFocus(pid) {
   if (zone) zone.classList.add('focused');
 }
 
-function customFocusPlay(pid) {
+function customFocusPlay(pid, event) {
   event.stopPropagation();
   autoClearEmptyPlay();
   validatePlayCombos();
@@ -1288,7 +1289,7 @@ function validatePlayCombos() {
           setTimeout(() => pa.classList.remove('combo-error'), 1500);
         }
       }
-    });
+    }).catch(() => {});   // best-effort visual hint — no unhandled rejection
   }
 }
 
@@ -1386,6 +1387,9 @@ function renderCustomZones() {
 }
 
 function renderCustomConfig() {
+  // In sim mode the builder config panel no longer exists (renderSimState
+  // replaced the center panel) — touching its nodes used to TypeError.
+  if (C.sim_mode) return;
   document.getElementById('custom-level').textContent = C.level;
   // Validation indicator
   const v = czValidate();
@@ -1402,7 +1406,7 @@ function renderCustomConfig() {
 // ==================================================================
 function customRandomDeal() {
   pushUndoState();
-  customClear();
+  customClear(true);   // internal push skipped — one shuffle = one undo step
   const allIds = [];
   for (let i = 0; i < 108; i++) allIds.push(i);
   for (let i = allIds.length - 1; i > 0; i--) {
@@ -1441,8 +1445,8 @@ function customDealRemaining() {
   renderCustomAll();
 }
 
-function customClear() {
-  pushUndoState();
+function customClear(skipUndo) {
+  if (!skipUndo) pushUndoState();
   C.hands = {0:[], 1:[], 2:[], 3:[]};
   for (let p = 0; p <= 3; p++) C.zone_play[p] = {action:(p===0?'turn':'pass'), cards:[]};
   C.focus_play = null;
@@ -1593,6 +1597,9 @@ resetPanelParams = function() {
 // Load state from any simulator into the custom builder
 // ==================================================================
 function customLoadFromSim(simState) {
+  // Kill any in-flight analysis first: its late finish used to clobber the
+  // builder button labels and write results into the next sim's panel.
+  if (C.running) stopC();
   // Extract hands from sim state
   C.hands = {0:[], 1:[], 2:[], 3:[]};
   if (simState.players) {
@@ -1719,9 +1726,14 @@ function renderSimState(state) {
 // ==================================================================
 // Start simulation
 // ==================================================================
+// The side button is mode-dispatching: in builder mode it starts the sim,
+// in sim mode it toggles the analysis (its label mirrors the center panel
+// but they are separate DOM nodes — the label change alone used to leave
+// it dead, clicking "分析" did nothing).
 async function customStart() {
-  if (C.sim_mode) return;
+  if (C.sim_mode) { runC(); return; }
   if (C.starting) return;   // in-flight guard: double-click created orphan simulators
+  if (C.running) stopC();   // old analysis must not leak into the new sim
   // Hard validation BEFORE submit: an illegal table combo used to be
   // silently dropped by the backend (its cards vanished from the game).
   const v = czValidate();
@@ -1757,7 +1769,10 @@ async function customStart() {
   }
   // Show what will happen to the unassigned pool cards
   const unassigned = 108 - assigned.size;
-  if (!confirm(`开始推演？\n手牌: ${C.hands.map(h => h.length).join('/')} 张\n未分配的 ${unassigned} 张牌将被视为「已打出」。\n级牌 Lv${C.level}`)) return;
+  // C.hands is a {0:[],1:[],2:[],3:[]} object — .map() on it threw a
+  // TypeError before confirm() ever showed, bricking this button entirely.
+  const handSummary = [0, 1, 2, 3].map(p => C.hands[p].length).join('/');
+  if (!confirm(`开始推演？\n手牌: ${handSummary} 张\n未分配的 ${unassigned} 张牌将被视为「已打出」。\n级牌 Lv${C.level}`)) return;
 
   const body = {
     hands: {'0': C.hands[0], '1': C.hands[1], '2': C.hands[2], '3': C.hands[3]},
@@ -1793,7 +1808,18 @@ async function customStart() {
     alert('请求失败: ' + e.message);
   } finally {
     C.starting = false;
-    if (startBtn && !C.sim_mode) { startBtn.disabled = false; startBtn.textContent = '开始推演'; }
+    if (startBtn) {
+      if (C.sim_mode) {
+        // Sim mode reuses this button as 分析/停止 — the stale disabled
+        // "初始化…" label used to survive the mode switch.
+        startBtn.disabled = false;
+        startBtn.textContent = '分析';
+        startBtn.className = 'btn btn-g btn-sm';
+      } else {
+        startBtn.disabled = false;
+        startBtn.textContent = '开始推演';
+      }
+    }
   }
 }
 
@@ -1827,13 +1853,21 @@ async function stepC(cardIds, pass) {
   C.res = [];
   const presEl = document.getElementById('cres');
   presEl.innerHTML = hadRunning ? '<div style="color:#e67e22;font-size:0.78em;padding:4px;margin-bottom:4px;background:rgba(230,126,34,0.08);border-radius:4px">已放弃等待中的分析</div>' : '<span class="emp">已执行，点击分析继续</span>';
-  document.getElementById('crcnt').textContent = '';
+  const crcntEl = document.getElementById('crcnt');
+  if (crcntEl) crcntEl.textContent = '';
 
   try {
     const body = {sim_id: C.simId, pass: !!pass};
     if (!pass) body.card_ids = cardIds;
     const r = await fetch('/api/arena/sim/step', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    const newState = await r.json();
+    const newState = await r.json().catch(() => ({}));
+    if (r.status === 404 || newState.error === 'Simulator not found') {
+      // The sim expired or was evicted — clear the dead handle so the UI
+      // stops firing every later action at a ghost (permanent mismatch).
+      C.simId = null; C.simState = null;
+      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">模拟器已过期，请重新开始推演</span>`;
+      return;
+    }
     if (newState.error) {
       presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
       return;
@@ -1853,22 +1887,41 @@ async function runC() {
   if (!C.simId) return;
   if (C.running) { stopC(); return; }
   C.running=true; C.res=[]; C.abort=new AbortController();
+  // Epoch guard: rebuilding the sim (编辑→重新开始推演) invalidates results
+  // from the old one — late responses used to pollute the new sim's panel.
+  C.runSeq = (C.runSeq||0) + 1;
+  const seq = C.runSeq;
   document.getElementById('cres').innerHTML=''; const btn=document.getElementById('btn-ac');
-  btn.textContent='停止'; btn.className='btn btn-red btn-sm';
+  if (btn) { btn.textContent='停止'; btn.className='btn btn-red btn-sm'; }
   const models = C.profs.map(p=>{const m={id:p.id,label:p.label};for(const k of Object.keys(p)){if(k!=='id'&&k!=='label')m[k]=p[k];}return m;});
-  document.getElementById('crcnt').textContent=`(0/${models.length})`;
-  const proms = models.map(async m=>{
+  const crcntEl = document.getElementById('crcnt');
+  if (crcntEl) crcntEl.textContent=`(0/${models.length})`;
+  // Serial like runT: per-request game_logger.clear() clobbers parallel
+  // debug logs; parallelism also made stale-response ordering unpredictable.
+  for (const m of models) {
     try {
       const r = await fetch('/api/arena/sim/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sim_id:C.simId,models:[m]}),signal:C.abort.signal});
-      if (!r.ok) C.res.push({model_id:m.id,model_name:m.label||m.id,error:'HTTP '+r.status});
+      if (seq !== C.runSeq) return;
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        C.res.push({model_id:m.id,model_name:m.label||m.id,error:d.error||('HTTP '+r.status)});
+      }
       else { const d=await r.json(); if(d.results)C.res.push(...d.results); }
     } catch(e) { if(e.name!=='AbortError') C.res.push({model_id:m.id,model_name:m.label||m.id,error:e.message}); }
-    renderResC(); document.getElementById('crcnt').textContent=`(${C.res.length}/${models.length})`;
-  });
-  await Promise.all(proms); finishC();
+    if (seq !== C.runSeq) return;
+    renderResC(); const c2=document.getElementById('crcnt'); if (c2) c2.textContent=`(${C.res.length}/${models.length})`;
+  }
+  if (seq !== C.runSeq) return;
+  finishC();
 }
-function stopC() { if(C.abort){C.abort.abort();C.abort=null;} finishC(); }
-function finishC() { C.running=false; const btn=document.getElementById('btn-ac'); btn.textContent='分析'; btn.className='btn btn-gn btn-sm'; }
+function stopC() { C.runSeq = (C.runSeq||0) + 1; if(C.abort){C.abort.abort();C.abort=null;} finishC(); }
+function finishC() {
+  C.running=false;
+  const btn=document.getElementById('btn-ac');
+  if (!btn) return;   // sim mode replaced the panel — no button to fix
+  if (C.sim_mode) { btn.textContent='分析'; btn.className='btn btn-gn btn-sm'; btn.disabled=false; }
+  else { btn.textContent='开始推演'; btn.className='btn btn-gn'; btn.disabled=false; }
+}
 
 function renderResC() {
   if (C._suppressRender) return;

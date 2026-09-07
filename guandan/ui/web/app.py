@@ -12,6 +12,7 @@ Run: python -m guandan.ui.web.app
 
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -35,6 +36,7 @@ app.register_blueprint(eval_bp)
 
 _games: dict = {}  # {sid: (InteractiveGame, last_access_timestamp)}
 _GAME_TTL = 30 * 60  # 30 minutes
+_GAMES_LOCK = threading.Lock()  # iterate-then-delete cleanup raced inserts (RuntimeError → 500)
 
 
 def _unwrap_game(entry):
@@ -44,8 +46,8 @@ def _unwrap_game(entry):
     return entry  # legacy: bare InteractiveGame
 
 
-def _cleanup_games():
-    """Remove expired game sessions."""
+def _cleanup_games_locked():
+    """Remove expired game sessions. Caller must hold _GAMES_LOCK."""
     now = time.time()
     expired = []
     for sid, entry in _games.items():
@@ -57,18 +59,19 @@ def _cleanup_games():
 
 
 def _get_game() -> InteractiveGame:
-    _cleanup_games()
     sid = session.get("game_id")
-    if sid and sid in _games:
-        game = _unwrap_game(_games[sid])
-        _games[sid] = (game, time.time())
+    with _GAMES_LOCK:
+        _cleanup_games_locked()
+        if sid and sid in _games:
+            game = _unwrap_game(_games[sid])
+            _games[sid] = (game, time.time())
+            return game
+        new_sid = uuid.uuid4().hex
+        session["game_id"] = new_sid
+        game = InteractiveGame(level=2)
+        _load_saved_config(game)
+        _games[new_sid] = (game, time.time())
         return game
-    sid = uuid.uuid4().hex
-    session["game_id"] = sid
-    game = InteractiveGame(level=2)
-    _load_saved_config(game)
-    _games[sid] = (game, time.time())
-    return game
 
 
 def _normalize_config(config: dict):
@@ -180,7 +183,8 @@ def api_new_game():
     session["game_id"] = sid
     game = InteractiveGame(level=2)
     _load_saved_config(game)
-    _games[sid] = (game, time.time())
+    with _GAMES_LOCK:
+        _games[sid] = (game, time.time())
     game.start_new_round()
     return jsonify(game.get_state())
 
@@ -595,104 +599,12 @@ def api_new_round():
 
 
 # ==================================================================
-# Arena API
+# (Legacy prototype arena endpoints removed — the live arena API lives in
+#  arena_api.py under /api/arena/*; these two had no frontend callers.)
 # ==================================================================
 
-@app.route("/api/arena/analyze", methods=["POST"])
-def api_arena_analyze():
-    """Analyze an endgame scenario: given hand, table combo, and level,
-    return AI candidates with scores.
-    """
-    from ...card import Card
-    from ...combo_parser import ComboParser
-    from ...combo_finder import ComboFinder
-    from ...ai.scorer import score_play
-    from ...ai.hand_eval import hand_score
-    from ...logging import game_logger
-
-    data = request.get_json()
-    card_ids = data.get("hand", [])
-    level = data.get("level", 2)
-    table_card_ids = data.get("table", None)
-    is_lead = data.get("is_lead", True)
-
-    # Build hand
-    hand = tuple(Card.from_id(i) for i in card_ids)
-
-    # Build table combo if provided
-    table_combo = None
-    if table_card_ids:
-        parser = ComboParser(level)
-        table_combo = parser.parse([Card.from_id(i) for i in table_card_ids])
-
-    # Clear old log and analyze
-    game_logger.clear()
-    finder = ComboFinder(hand, level)
-
-    if is_lead or table_combo is None:
-        from ...ai.agent import _generate_lead_candidates
-        candidates = _generate_lead_candidates(finder, hand)
-    else:
-        candidates = []
-        combo = finder.pick_response(table_combo)
-        if combo:
-            candidates.append(combo)
-        bomb = finder._find_any_bomb()
-        if bomb:
-            candidates.append(bomb)
-
-    # Score each
-    results = []
-    for c in candidates:
-        used_ids = {x.id for x in c.cards}
-        hand_after = tuple(x for x in hand if x.id not in used_ids)
-        s = score_play(c, hand, hand_after, table_combo, level)
-        results.append({
-            "type": c.combo_type.name,
-            "type_cn": _COMBO_TYPE_CN.get(c.combo_type.value, c.combo_type.name),
-            "cards": [x.display for x in c.cards],
-            "card_ids": [x.id for x in c.cards],
-            "length": c.length,
-            "main_rank": c.main_rank.name,
-            "is_bomb": c.is_bomb,
-            "score": round(s, 2),
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-
-    hs = hand_score(hand, level)
-
-    return jsonify({
-        "hand_display": [Card.from_id(i).display for i in card_ids],
-        "hand_size": len(hand),
-        "hand_score": round(hs, 2),
-        "table_display": [Card.from_id(i).display for i in table_card_ids] if table_card_ids else None,
-        "is_lead": is_lead,
-        "candidates": results,
-        "ai_log": game_logger.query(category="ai", count=200),
-    })
-
-
-@app.route("/api/arena/random_hand", methods=["POST"])
-def api_arena_random_hand():
-    """Generate a random hand for testing."""
-    import random
-    data = request.get_json() or {}
-    size = data.get("size", 10)
-    all_ids = list(range(108))
-    random.shuffle(all_ids)
-    hand_ids = all_ids[:size]
-    from ...card import Card
-    return jsonify({
-        "hand_ids": hand_ids,
-        "hand_display": [Card.from_id(i).display for i in hand_ids],
-    })
-
-
-_COMBO_TYPE_CN = {
-    1: "单张", 2: "对子", 3: "三条", 4: "三带二",
-    5: "顺子", 6: "连对", 7: "钢板", 8: "炸弹", 9: "同花顺", 10: "天王炸",
-}
+# Canonical map lives in constants.COMBO_TYPE_CN.
+from ...constants import COMBO_TYPE_CN as _COMBO_TYPE_CN
 
 
 # ==================================================================

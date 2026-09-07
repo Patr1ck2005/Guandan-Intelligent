@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -48,43 +48,43 @@
 
 	    <div class="arena-tbl custom-tbl" id="tbl-c">
       <div id="custom-builder" onclick="customClearFocus(event)">
-        <div class="player-zone you" id="cz-0" onclick="customFocus(0)">
+        <div class="player-zone you" id="cz-0" onclick="customFocus(0, event)">
           <div class="zone-header"><span class="name you">你</span><span class="cz-cnt" id="czcnt-0">0张</span></div>
           <div class="ahc cz-hand" id="czhand-0"></div>
         </div>
-        <div class="player-zone right" id="cz-1" onclick="customFocus(1)">
+        <div class="player-zone right" id="cz-1" onclick="customFocus(1, event)">
           <div class="zone-header"><span class="name">右家</span><span class="cz-cnt" id="czcnt-1">0张</span></div>
           <div class="ahc cz-hand" id="czhand-1"></div>
         </div>
-        <div class="player-zone partner" id="cz-2" onclick="customFocus(2)">
+        <div class="player-zone partner" id="cz-2" onclick="customFocus(2, event)">
           <div class="zone-header"><span class="name">对家</span><span class="cz-cnt" id="czcnt-2">0张</span></div>
           <div class="ahc cz-hand" id="czhand-2"></div>
         </div>
-        <div class="player-zone left" id="cz-3" onclick="customFocus(3)">
+        <div class="player-zone left" id="cz-3" onclick="customFocus(3, event)">
           <div class="zone-header"><span class="name">左家</span><span class="cz-cnt" id="czcnt-3">0张</span></div>
           <div class="ahc cz-hand" id="czhand-3"></div>
         </div>
 
         <!-- Play areas (between zones and center) -->
-        <div class="cz-play-area you" id="czpa-0" onclick="customFocusPlay(0)">
+        <div class="cz-play-area you" id="czpa-0" onclick="customFocusPlay(0, event)">
           <button class="czpa-btn czpa-play active" id="czpa-play-0" onclick="event.stopPropagation();czSetPlay(0,'play')">出牌</button>
           <button class="czpa-btn czpa-pass" id="czpa-pass-0" onclick="event.stopPropagation();czSetPlay(0,'pass')">过</button>
           <button class="czpa-btn czpa-turn" id="czpa-turn-0" onclick="event.stopPropagation();czSetPlay(0,'turn')">轮到</button>
           <span class="cz-pcards" id="czpcard-0"></span>
         </div>
-        <div class="cz-play-area right" id="czpa-1" onclick="customFocusPlay(1)">
+        <div class="cz-play-area right" id="czpa-1" onclick="customFocusPlay(1, event)">
           <button class="czpa-btn czpa-play" id="czpa-play-1" onclick="event.stopPropagation();czSetPlay(1,'play')">出牌</button>
           <button class="czpa-btn czpa-pass" id="czpa-pass-1" onclick="event.stopPropagation();czSetPlay(1,'pass')">过</button>
           <button class="czpa-btn czpa-turn" id="czpa-turn-1" onclick="event.stopPropagation();czSetPlay(1,'turn')">轮到</button>
           <span class="cz-pcards" id="czpcard-1"></span>
         </div>
-        <div class="cz-play-area partner" id="czpa-2" onclick="customFocusPlay(2)">
+        <div class="cz-play-area partner" id="czpa-2" onclick="customFocusPlay(2, event)">
           <button class="czpa-btn czpa-play" id="czpa-play-2" onclick="event.stopPropagation();czSetPlay(2,'play')">出牌</button>
           <button class="czpa-btn czpa-pass" id="czpa-pass-2" onclick="event.stopPropagation();czSetPlay(2,'pass')">过</button>
           <button class="czpa-btn czpa-turn" id="czpa-turn-2" onclick="event.stopPropagation();czSetPlay(2,'turn')">轮到</button>
           <span class="cz-pcards" id="czpcard-2"></span>
         </div>
-        <div class="cz-play-area left" id="czpa-3" onclick="customFocusPlay(3)">
+        <div class="cz-play-area left" id="czpa-3" onclick="customFocusPlay(3, event)">
           <button class="czpa-btn czpa-play" id="czpa-play-3" onclick="event.stopPropagation();czSetPlay(3,'play')">出牌</button>
           <button class="czpa-btn czpa-pass" id="czpa-pass-3" onclick="event.stopPropagation();czSetPlay(3,'pass')">过</button>
           <button class="czpa-btn czpa-turn" id="czpa-turn-3" onclick="event.stopPropagation();czSetPlay(3,'turn')">轮到</button>

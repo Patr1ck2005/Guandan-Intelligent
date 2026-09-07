@@ -3,6 +3,7 @@
 Blueprint registered on the Flask app.
 """
 
+import threading
 import time
 from flask import Blueprint, jsonify, request
 
@@ -278,23 +279,31 @@ class Simulator:
 # In-memory simulator storage (keyed by session-like ID)
 # {sim_id: (Simulator, last_access_timestamp)}
 _SIM_TTL = 10 * 60  # 10 minutes
+_MAX_SIMS = 64      # create-heavy clients used to pile up sims until TTL
 _simulators: dict = {}
+_SIMS_LOCK = threading.Lock()
 
 
-def _cleanup_sims():
+def _cleanup_sims_locked():
+    """Sweep expired sims. Caller must hold _SIMS_LOCK."""
     now = time.time()
     expired = [sid for sid, (_, ts) in _simulators.items() if now - ts > _SIM_TTL]
     for sid in expired:
         del _simulators[sid]
+    # Hard cap: evict oldest when over budget.
+    while len(_simulators) > _MAX_SIMS:
+        oldest = min(_simulators.items(), key=lambda kv: kv[1][1])[0]
+        del _simulators[oldest]
 
 
 def _get_sim(sim_id: str) -> Simulator | None:
-    _cleanup_sims()
-    entry = _simulators.get(sim_id)
-    if entry:
-        sim, _ = entry
-        _simulators[sim_id] = (sim, time.time())
-        return sim
+    with _SIMS_LOCK:
+        _cleanup_sims_locked()
+        entry = _simulators.get(sim_id)
+        if entry:
+            sim, _ = entry
+            _simulators[sim_id] = (sim, time.time())
+            return sim
     return None
 
 
@@ -410,8 +419,12 @@ def get_perspectives(scenario_id):
         view = _build_view(s, perspective=p)
         pj = view.to_json()
         pj["player_name"] = player_names[p]
+        # view.my_hand is p's own hand for EVERY perspective (the scenario is
+        # omniscient data); opponent_hand_size(p) was always 0 for p > 0
+        # because a seat is never its own opponent. Card faces stay hidden
+        # for p > 0 (only sizes are public).
         pj["my_hand"] = [_card_json(c, s.level) for c in view.my_hand] if p == 0 else []
-        pj["my_hand_size"] = len(view.my_hand) if p == 0 else view.opponent_hand_size(p)
+        pj["my_hand_size"] = len(view.my_hand)
         perspectives[str(p)] = pj
 
     return jsonify({
@@ -507,10 +520,18 @@ def benchmark():
     """Run models across a category of scenarios."""
     data = request.get_json() or {}
     model_profiles = data.get("models", [{"id": "blind"}])
+    if not isinstance(model_profiles, list) or not model_profiles:
+        return jsonify({"error": "models must be a non-empty list"}), 400
     category = data.get("category")
     scenarios = ALL_SCENARIOS
     if category:
+        if category not in list_categories():
+            return jsonify({"error": f"unknown category: {category}"}), 400
         scenarios = [s for s in scenarios if s.category == category]
+        if not scenarios:
+            # An empty category silently rendered "无结果" forever — tell the
+            # caller instead (all 12 curated scenarios are deduction-only).
+            return jsonify({"error": f"类别「{category}」暂无场景数据"}), 400
 
     schema = get_schema()
     schema_names = {}
@@ -526,6 +547,12 @@ def benchmark():
             label = entry.get("label") if isinstance(entry, dict) else None
             agent, name = _make_arena_agent(entry if isinstance(entry, dict) else {"id": mid})
             if agent is None:
+                # Unknown models used to vanish silently (排行榜 numbers
+                # unchanged, no hint); report per-model like sim_analyze.
+                results.append({"scenario_id": scenario.id, "scenario_name": scenario.name,
+                                "category": scenario.category, "model": mid,
+                                "model_name": label or mid, "error": "Unknown model",
+                                "correct": False, "elapsed_ms": 0})
                 continue
             name = label or schema_names.get(mid, name or mid)
 
@@ -594,9 +621,10 @@ def sim_init():
         return jsonify({"error": "Scenario not found"}), 404
 
     sid = uuid.uuid4().hex
-    _cleanup_sims()  # also sweep on create: init-only sims used to linger
     sim = Simulator(scenario)
-    _simulators[sid] = (sim, time.time())
+    with _SIMS_LOCK:
+        _cleanup_sims_locked()  # also sweep on create: init-only sims used to linger
+        _simulators[sid] = (sim, time.time())
     state = sim.get_state()
     state["sim_id"] = sid
     return jsonify(state)
@@ -664,8 +692,9 @@ def sim_init_custom():
     except Exception as e:
         return jsonify({"error": f"Failed to create simulator: {e}"}), 500
 
-    _cleanup_sims()  # also sweep on create: init-only sims used to linger
-    _simulators[sid] = (sim, time.time())
+    with _SIMS_LOCK:
+        _cleanup_sims_locked()  # also sweep on create: init-only sims used to linger
+        _simulators[sid] = (sim, time.time())
     state = sim.get_state()
     state["sim_id"] = sid
     return jsonify(state)
@@ -692,6 +721,12 @@ def sim_step():
         return jsonify({"error": "Simulator not found"}), 404
 
     player_id = data.get("player_id", sim.state.current_player)
+    # Hard-validate before touching hands: player_id=7 used to IndexError → 500,
+    # and any non-current player could play via direct API calls.
+    if not isinstance(player_id, int) or not (0 <= player_id <= 3):
+        return jsonify({"error": "player_id must be an integer 0-3"}), 400
+    if player_id != sim.state.current_player:
+        return jsonify({"error": f"不是玩家 {player_id} 的回合（当前轮到 {sim.state.current_player}）"}), 400
     if data.get("pass"):
         err = sim.apply_pass(player_id)
         if err:
@@ -718,6 +753,9 @@ def sim_analyze():
         return jsonify({"error": "Simulator not found"}), 404
 
     model_profiles = data.get("models", [{"id": "blind"}])
+    if not isinstance(model_profiles, list) or not model_profiles:
+        # models:null used to TypeError → 500; align with analyze_scenario.
+        return jsonify({"error": "models must be a non-empty list"}), 400
     state = sim.state
     level = state.level
     current_pid = state.current_player
@@ -819,7 +857,5 @@ def check_combo():
         })
 
 
-_COMBO_TYPE_CN = {
-    1: "单张", 2: "对子", 3: "三条", 4: "三带二",
-    5: "顺子", 6: "连对", 7: "钢板", 8: "炸弹", 9: "同花顺", 10: "天王炸",
-}
+# Canonical map lives in constants.COMBO_TYPE_CN.
+from ...constants import COMBO_TYPE_CN as _COMBO_TYPE_CN

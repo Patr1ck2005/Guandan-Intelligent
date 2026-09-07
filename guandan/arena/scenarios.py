@@ -300,4 +300,8 @@ def get_scenarios_by_category(category: str) -> List[Scenario]:
 
 
 def list_categories() -> List[str]:
-    return ["deduction", "sampling", "endgame", "opening"]
+    # Only categories that actually have scenarios. The fixed 4-name list
+    # advertised sampling/endgame/opening with zero data behind them — the
+    # T-tab scene picker rendered "无场景" and its benchmark always showed
+    # "无结果" (the category existed in name only).
+    return sorted({s.category for s in ALL_SCENARIOS})
