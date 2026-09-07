@@ -469,6 +469,9 @@ function renderScList(cid, cat, sid, fn) {
 // ==================================================================
 function buildTable(containerId, st, opts) {
   const o = opts || {mode: 'sim'};
+  // Selection set is per-tab: hardcoding P.selected highlighted cards from
+  // the 确定推演 tab while viewing the 真实牌桌 tab (and vice versa).
+  const selSet = o.selectedSet || P.selected;
   const el = document.getElementById(containerId);
   if (!el || !st) return;
   const pls = st.players||[];
@@ -492,7 +495,7 @@ function buildTable(containerId, st, opts) {
     html += `<div class="zone-header"><span class="name${p===0?' you':''}">${names[p]}</span><span class="hand-size">${pi.hand_size||cards.length}</span>张${pi.finished?' <span class="finished-tag" style="display:inline">已完成</span>':''}</div>`;
     if (cards.length) {
       html += `<div class="ahc" id="ahc-${containerId}-${p}">${scs(cards).map(c => {
-        const sel = P.selected.has(c.id) ? ' selected' : '';
+        const sel = selSet.has(c.id) ? ' selected' : '';
         const clickable = (o.mode === 'sim' && cp===p) ? ' clickable' : '';
         const click = (o.mode === 'sim' && cp===p) ? ` data-cid="${c.id}" onclick="toggleArenaCard(${c.id})"` : '';
         return ac(c, sel+clickable, click);
@@ -548,8 +551,14 @@ function toggleArenaCard(cid) {
   });
 }
 
+function _simNoSelectionHint(resId) {
+  const el = document.getElementById(resId);
+  if (el) el.innerHTML = '<span class="emp">先点击当前回合玩家的手牌选择要出的牌</span>' + el.innerHTML;
+}
+
 function manualPlay() {
-  if (!P.simId || P.selected.size===0) return;
+  if (!P.simId) return;
+  if (P.selected.size === 0) { _simNoSelectionHint('pres'); return; }
   stepP(Array.from(P.selected), false);
 }
 
@@ -635,9 +644,18 @@ async function selP(id) {
     P.res=[];
     pres.innerHTML='<span class="emp">点击分析</span>';
     buildTable('tbl-p', P.simState);
-    // Scenario info
-    const s = await (await fetch('/api/arena/scenarios/'+id)).json();
-    document.getElementById('dbg-sc-p').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
+    // Scenario info: best-effort AFTER the sim is live. No seq re-check here
+    // would let a slow fetch for the OLD scenario overwrite dbg-sc-p, and an
+    // await-throw used to roll back the (already successful) sim init.
+    (async () => {
+      try {
+        const sr = await fetch('/api/arena/scenarios/'+id);
+        if (!sr.ok) return;
+        const s = await sr.json();
+        if (seq !== P.reqSeq) return;   // user switched scenarios meanwhile
+        document.getElementById('dbg-sc-p').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
+      } catch (e) { /* detail panel is best-effort */ }
+    })();
   } catch (e) {
     if (seq !== P.reqSeq) return;
     P.simState = null; P.simId = null;
@@ -664,7 +682,15 @@ async function stepP(cardIds, pass) {
     const body = {sim_id:P.simId, pass:!!pass};
     if (!pass) body.card_ids = cardIds;
     const r = await fetch('/api/arena/sim/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const newState = await r.json();
+    const newState = await r.json().catch(() => ({}));
+    if (r.status === 404 || newState.error === 'Simulator not found') {
+      // The sim expired or was evicted — clear the dead handle so the UI
+      // stops firing every later action at a ghost (P-tab previously kept
+      // the stale sim_id and all later 执行/分析 hit nothing).
+      P.simId = null; P.simState = null;
+      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">模拟器已过期，请重新选择场景初始化</span>`;
+      return;
+    }
     if (newState.error) {
       presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
       return;
@@ -860,7 +886,9 @@ function scenarioTableState(detail) {
 
 function renderTableT() {
   if (!T.detail) return;
-  buildTable('tbl-t', scenarioTableState(T.detail), {mode: 'scenario'});
+  // The 真实牌桌 table is read-only — it must not inherit the 确定推演
+  // tab's card selection highlight.
+  buildTable('tbl-t', scenarioTableState(T.detail), {mode: 'scenario', selectedSet: new Set()});
   // Unknown cards
   if (T.debug||T.persp>0) {
     const s=T.detail; if(!s) return;
@@ -1834,7 +1862,8 @@ function toggleArenaCardC(cid) {
 }
 
 function manualPlayC() {
-  if (!C.simId || C.selected.size===0) return;
+  if (!C.simId) return;
+  if (C.selected.size === 0) { _simNoSelectionHint('cres'); return; }
   stepC(Array.from(C.selected), false);
 }
 
@@ -1864,8 +1893,16 @@ async function stepC(cardIds, pass) {
     if (r.status === 404 || newState.error === 'Simulator not found') {
       // The sim expired or was evicted — clear the dead handle so the UI
       // stops firing every later action at a ghost (permanent mismatch).
+      // Restore builder mode too: leaving sim_mode on kept the sidebar
+      // button labeled 分析 (clicking it silently no-oped at the null
+      // simId) and left dead 出牌/分析 buttons in the center panel.
       C.simId = null; C.simState = null;
-      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">模拟器已过期，请重新开始推演</span>`;
+      C.sim_mode = false;
+      const ctrEl = document.querySelector('#custom-builder .tbl-ctr > div');
+      if (ctrEl && C._builder_panel) ctrEl.innerHTML = C._builder_panel;
+      const btnAc2 = document.getElementById('btn-ac');
+      if (btnAc2) { btnAc2.textContent = '开始推演'; btnAc2.className = 'btn btn-gn'; btnAc2.disabled = false; }
+      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">模拟器已过期 — 牌局已恢复为编辑状态，可重新开始推演</span>`;
       return;
     }
     if (newState.error) {

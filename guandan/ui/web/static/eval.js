@@ -358,8 +358,11 @@ async function applyTunerWeights() {
   // the game page can also overwrite them right back from its stale
   // in-memory config. The confirm + note make the blast radius visible.
   if (!confirm('把调参最优权重写入 config.json？\n新权重对之后创建的对局生效；对局页的「AI设置→应用」会用其内存配置覆盖本文件。')) return;
+  // E.lastTunerRunId is captured by pollJob when the job finishes — the
+  // panel's own run. Falling back to /tuner/best (the LATEST tuner run)
+  // silently applied a different run's weights when the user reviewed an
+  // older result.
   if (!E.lastTunerRunId) {
-    // find latest tuner run
     try {
       const r = await fetch('/api/eval/tuner/best');
       const d = await r.json();
@@ -460,6 +463,7 @@ async function pollJob(jobId, renderFn) {
       // User pressed 停止: keep the stopping notice visible until the
       // terminal poll lands instead of flashing progress bars over it.
       if (d.status === 'done') {
+        if (d.run_id != null) E.lastTunerRunId = d.run_id;
         if (renderFn) renderFn(d.result);
         else document.getElementById('eval-result').innerHTML = '<div class="ok">任务已完成（结果已入历史）</div>';
         E.stopping = false;
@@ -478,6 +482,10 @@ async function pollJob(jobId, renderFn) {
       return;
     }
     if (d.status === 'done') {
+      // Remember which persisted run produced this panel — the tuner's
+      // 应用最优权重 button must apply THIS run, not whatever /tuner/best
+      // returns by the time the user clicks it.
+      if (d.run_id != null) E.lastTunerRunId = d.run_id;
       if (renderFn) renderFn(d.result);
       else if (d.run_id == null) {
         // store_run failures are swallowed server-side; run_id null means
@@ -817,9 +825,17 @@ async function loadRegressionSection() {
 
 function runRegression() {
   const el = document.getElementById('eval-result');
+  // Same job-lock discipline as the other run* entry points: the regression
+  // section buttons aren't covered by the run-panel's disabled state, so a
+  // click during a running tuner/match used to cancel that job mid-flight.
+  if (E.jobId) { el.innerHTML = '<div class="bad">有任务正在运行，请先停止或等待完成</div>'; return; }
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">启动回归套件（基准 + 固定 seed 自对弈）…</div>';
   postJob('/api/eval/regression', {}, el)
-    .then(d => { if (d && d.job_id) startJob(d.job_id, renderRegressionResult); });
+    .then(d => {
+      if (d && d.job_id) startJob(d.job_id, renderRegressionResult);
+      else _unlockJobId();   // start failed — release the optimistic lock
+    });
 }
 
 function renderRegressionResult(res) {
