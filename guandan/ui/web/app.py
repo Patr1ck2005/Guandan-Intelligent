@@ -236,46 +236,10 @@ def api_debug():
     return jsonify({"hands": hands})
 
 
-@app.route("/api/log")
-def api_log():
-    """Query log entries with optional filters (garbage-tolerant)."""
-    category = request.args.get("category")
-    level = request.args.get("level")
-    try:
-        count = int(request.args.get("count", 200))
-    except (TypeError, ValueError):
-        count = 200
-    count = max(1, min(count, 2000))
-    from ...logging import game_logger
-    entries = game_logger.query(category=category, level=level, count=count)
-    return jsonify({"entries": entries, "count": len(entries)})
-
-
-@app.route("/api/log/categories")
-def api_log_categories():
-    return jsonify({"categories": ["game", "ai", "web", "system"]})
-
-
-@app.route("/api/log/clear", methods=["POST"])
-def api_log_clear():
-    from ...logging import game_logger
-    game_logger.clear()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/log/level", methods=["GET", "POST"])
-def api_log_level():
-    from ...logging import game_logger
-    if request.method == "POST":
-        level = request.get_json().get("level", "INFO")
-        game_logger.set_level(level)
-        return jsonify({"level": game_logger.get_level()})
-    return jsonify({"level": game_logger.get_level()})
-
-
 @app.route("/api/ai_log")
 def api_ai_log():
-    """Backward-compat: delegates to /api/log?category=ai."""
+    """AI decision log for the game page (independent of the removed
+    /api/log family — this queries category=ai directly)."""
     from ...logging import game_logger
     entries = game_logger.query(category="ai", count=500)
     return jsonify({"entries": entries, "last_decision": []})

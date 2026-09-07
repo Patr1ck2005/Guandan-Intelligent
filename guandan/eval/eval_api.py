@@ -15,7 +15,6 @@ import uuid
 
 from flask import Blueprint, jsonify, request
 
-from ..ai.registry import get_schema
 from .common import _build_view, _make_arena_agent
 from .metrics import agreement_rate, is_correct, wilson_interval
 from .scenario_bank import get_bank, generate_synthetic_scenarios, scenario_json
@@ -237,21 +236,9 @@ def _spawn(jid: str, fn):
 # Endpoints
 # ------------------------------------------------------------------
 
-@eval_bp.route("/api/eval/models")
-def list_models():
-    schema = get_schema()
-    decider = schema.get("decider", {}).get("models", {})
-    inner = schema.get("inner_model", {}).get("models", {})
-    enumerator = schema.get("enumerator", {}).get("models", {})
-    return jsonify({
-        "outer": [{"id": mid, "name": m["name"], "description": m.get("description", ""),
-                   "is_mc": m.get("is_mc", False)} for mid, m in decider.items()],
-        "inner": [{"id": mid, "name": m["name"], "description": m.get("description", "")}
-                  for mid, m in inner.items()],
-        "enumerator": [{"id": mid, "name": m["name"], "description": m.get("description", "")}
-                       for mid, m in enumerator.items()],
-    })
-
+# (/api/eval/models removed — zero frontend/tool callers; eval.js carries
+#  its own MODEL_PARAMS metadata and the arena models endpoint serves the
+#  schema-driven picker.)
 
 @eval_bp.route("/api/eval/scenarios")
 def list_scenarios():

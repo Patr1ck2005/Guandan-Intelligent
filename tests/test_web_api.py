@@ -24,26 +24,6 @@ def _post_json(client, path, payload):
 
 
 # ---------------------------------------------------------------------------
-# /api/log — garbage count must not 500 (probe B)
-# ---------------------------------------------------------------------------
-
-def test_log_count_garbage_is_tolerated(client):
-    r = client.get("/api/log?count=abc")
-    assert r.status_code == 200
-    assert "entries" in r.get_json()
-
-
-def test_log_count_huge_is_clamped(client):
-    r = client.get("/api/log?count=99999999")
-    assert r.status_code == 200
-
-
-def test_log_negative_count_is_clamped(client):
-    r = client.get("/api/log?count=-5")
-    assert r.status_code == 200
-
-
-# ---------------------------------------------------------------------------
 # /api/config — bad player keys and null params must not 500 (probe B)
 # ---------------------------------------------------------------------------
 

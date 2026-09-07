@@ -110,7 +110,7 @@ Tests use `Card.from_id(n)` to construct hands. Mock external services (HTTP) in
 | `/api/suggest` | GET | Full AI suggestion with win rates |
 | `/api/evaluate` | POST | MC evaluation of selected cards |
 | `/api/debug` | GET | Full hand info (debug mode) |
-| `/api/log`, `/api/ai_log` | GET | Query log entries |
+| `/api/ai_log` | GET | AI decision log entries |
 | `/api/config` | GET/POST | Read/save AI configuration |
 | `/api/auto_play` | POST | Toggle auto-play mode |
 
@@ -133,7 +133,6 @@ Tests use `Card.from_id(n)` to construct hands. Mock external services (HTTP) in
 ### Eval Lab (`eval_api.py`)
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/eval/models` | GET | Model schema for eval configs |
 | `/api/eval/scenarios` | GET | Scenario bank (filterable) |
 | `/api/eval/scenarios/generate` | POST | Generate synthetic scenarios (exact-solver labels) |
 | `/api/eval/benchmark` | POST | Scenario benchmark (Wilson 95% CI in summary) |

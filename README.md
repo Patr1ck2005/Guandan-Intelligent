@@ -185,7 +185,6 @@ CLAUDE.md                # Claude Code 项目文档
 | `/api/debug` | GET | 调试模式（显示全手牌） |
 | `/api/config` | GET/POST | 读取/保存 AI 配置 |
 | `/api/auto_play` | POST | 切换自动出牌 |
-| `/api/log` | GET | 查询日志 |
 | `/api/ai_log` | GET | 查询 AI 日志 |
 
 ### Arena API
@@ -208,7 +207,6 @@ CLAUDE.md                # Claude Code 项目文档
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
-| `/api/eval/models` | GET | 可用模型 schema |
 | `/api/eval/scenarios` | GET | 场景题库（过滤） |
 | `/api/eval/scenarios/generate` | POST | 生成合成场景（精确解标注） |
 | `/api/eval/benchmark` | POST | 场景基准（含 Wilson 95% CI） |
