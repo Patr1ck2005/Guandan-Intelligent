@@ -38,7 +38,7 @@ def main():
     j = wait_job(call("/api/eval/benchmark", {
         "models": [{"id": "blind"}, {"id": "mc", "num_samples": 8,
                                      "time_limit_ms": 500, "inner": "blind",
-                                     "enumerator": "fast"}],
+                                     "enumerator": "full"}],
         "max_scenarios": 12})["job_id"])
     assert j["status"] == "done", j
     run_id = j["run_id"]

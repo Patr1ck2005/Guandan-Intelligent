@@ -502,18 +502,26 @@ class InteractiveGame:
         play_cards = None
         try:
             agent = create_agent_for_player(self.config, player_id)
-            view = PlayerView(self.state, player_id, self.action_log)
+            view = PlayerView(self.state, player_id, self.action_log,
+                              tribute_records=self._tribute_records)
 
             if self.agent_timeout_ms > 0:
                 timeout_s = self.agent_timeout_ms / 1000
+                executor = ThreadPoolExecutor(max_workers=1)
                 try:
-                    with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(agent.choose_play, view)
-                        play_cards = future.result(timeout=timeout_s)
+                    future = executor.submit(agent.choose_play, view)
+                    play_cards = future.result(timeout=timeout_s)
                 except FutureTimeoutError:
                     game_logger.warning("agent_timeout", player=player_id,
                                         timeout_ms=self.agent_timeout_ms)
                     play_cards = None
+                    # Do NOT block on shutdown: with-block semantics ran
+                    # shutdown(wait=True) while the FutureTimeoutError was
+                    # still propagating, so a wedged agent (LLM retries can
+                    # exceed the timeout) held the session lock for minutes.
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
             else:
                 play_cards = agent.choose_play(view)
         except Exception as e:
@@ -597,32 +605,6 @@ class InteractiveGame:
                 return [c]
         return []
 
-    def _mask_state_for_player(self, player_id: int) -> GameState:
-        """Return a copy of the state with opponent hands masked (empty tuples).
-
-        AI agents must not see other players' specific cards — only hand sizes.
-        """
-        masked_hands = []
-        for p in range(4):
-            if p == player_id:
-                masked_hands.append(self.state.hands[p])
-            else:
-                # Replace with empty tuple — AI only knows hand size via other means
-                masked_hands.append(tuple())
-        # Create a shallow copy with masked hands
-        from ..game_state import GameState as GS
-        from ..table import TableState
-        return GS(
-            level=self.state.level,
-            round_number=self.state.round_number,
-            hands=tuple(masked_hands),
-            played_cards=list(self.state.played_cards),
-            finished_positions=list(self.state.finished_positions),
-            current_player=self.state.current_player,
-            table=self.state.table,
-            trick_number=self.state.trick_number,
-        )
-
     def _compute_human_win_rate(self, cards: list):
         """MC to score the human's last action, using global config params."""
         try:
@@ -633,7 +615,8 @@ class InteractiveGame:
             agent = create_agent_for_player(self.config, self.HUMAN_ID)
             if not isinstance(agent, MonteCarloAgent):
                 agent = MonteCarloAgent()
-            view = PlayerView(self.state, self.HUMAN_ID, self.action_log)
+            view = PlayerView(self.state, self.HUMAN_ID, self.action_log,
+                              tribute_records=self._tribute_records)
             if not cards:
                 scored = agent.score_candidates(view, [], can_pass=True)
                 self._human_win_rate = scored[0][1] if scored else None
@@ -907,7 +890,5 @@ class InteractiveGame:
         }
 
 
-_COMBO_TYPE_CN = {
-    1: "单张", 2: "对子", 3: "三条", 4: "三带二",
-    5: "顺子", 6: "连对", 7: "钢板", 8: "炸弹", 9: "同花顺", 10: "天王炸",
-}
+# Back-compat alias — the canonical map lives in constants.COMBO_TYPE_CN.
+from ..constants import COMBO_TYPE_CN as _COMBO_TYPE_CN  # noqa: E402

@@ -25,7 +25,7 @@ WIN_TOLERANCE_PP = 15.0
 REFERENCE_PROFILES = [
     {"id": "blind", "label": "blind"},
     {"id": "mc", "label": "mc", "num_samples": 8, "time_limit_ms": 500,
-     "inner": "blind", "enumerator": "fast"},
+     "inner": "blind", "enumerator": "full"},
 ]
 
 

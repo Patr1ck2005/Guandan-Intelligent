@@ -25,7 +25,11 @@ _dec = _builder.category("decider", "决策器", "玩家直接使用的决策模
 
 _blind = _builder.model("decider", "blind", "Blind 盲评",
     description="只看自己手牌，按AIParams权重打分")
+# Only genuine float-tunable AIParams fields belong here: log_level/log_*
+# leaked in via to_dict() and showed up as fake "float" tuning knobs.
 for k, v in DEFA.to_dict().items():
+    if k.startswith("log_"):
+        continue
     _builder.param(_blind, k, "float", v, label=k, step=0.5)
 
 _mc = _builder.model("decider", "mc", "MC 蒙特卡洛",
@@ -39,7 +43,7 @@ _builder.param(_mc, "enumerator", "ref", "top_n", label="候选枚举", ref_cate
 
 # IS-MCTS
 _ism = _builder.model("decider", "ismcts", "IS-MCTS 树搜索",
-    description="信息集MC树搜索：UCB选择→展开→模拟→回传", is_mc=True)
+    description="UCB 候选评审：对候选逐个胜率模拟，按访问次数选优（当前实现为 1 层 UCB，不做深层树展开）", is_mc=True)
 _builder.param(_ism, "max_iterations", "int", 500, label="最大迭代")
 _builder.param(_ism, "time_limit_ms", "int", 10000, label="时限(ms)")
 _builder.param(_ism, "ucb_c", "float", 1.4, label="UCB探索常数", step=0.1)
@@ -71,6 +75,8 @@ _inn = _builder.category("inner_model", "内层模型", "MC模拟内部使用，
 _i_blind = _builder.model("inner_model", "blind", "Blind 盲评",
     description="与外部Blind相同，模拟内每步评分", needs_full_info=True)
 for k, v in DEFA.to_dict().items():
+    if k.startswith("log_"):
+        continue
     _builder.param(_i_blind, k, "float", v, label=k, step=0.5)
 
 _i_inf = _builder.model("inner_model", "informed", "Informed 控权评分",
@@ -105,8 +111,10 @@ _mem = _builder.model("enumerator", "memory", "记忆感知枚举",
 _topn = _builder.model("enumerator", "top_n", "预筛TopN",
     description="预评分后取前N个候选")
 _builder.param(_topn, "top_n", "int", 5, label="保留数")
+# Pre-scoring must stay blind-only: informed/round would read all four real
+# hands before opponent sampling, handing the outer MC perfect information.
 _builder.param(_topn, "pre_scorer", "select", "blind", label="预评分器",
-               options={"blind":"Blind","informed":"Informed","round":"Round"})
+               options={"blind": "Blind"})
 
 
 # ==================================================================
@@ -120,10 +128,6 @@ def get_schema() -> dict:
 # ==================================================================
 # Default config (for new games)
 # ==================================================================
-
-def _defaults(models: Dict[str, ModelDef]) -> dict:
-    return {mid: {k: p.default for k, p in m.params.items()}
-            for mid, m in models.items()}
 
 DEFAULT_CONFIG = {
     "players": {p: {"decider": None, "params": {}} for p in range(4)},
@@ -215,11 +219,18 @@ def create_agent_for_player(config: dict, player_id: int):
         inner = _make_inner_agent(inner_id, inner_params)
         sampler = create_sampler(sampler_id)
 
-        from .candidate_enum import create_enumerator
+        from .candidate_enum import create_enumerator, list_enumerators
         enum_kw = {}
         if enumerator_id == "top_n":
             enum_kw["top_n"] = _to_int(params, "top_n", 5)
             enum_kw["pre_scorer"] = params.get("pre_scorer", "blind")
+        if enumerator_id not in list_enumerators():
+            # A stale/typo'd enumerator id used to silently mean "full";
+            # log it loudly and fall back so live games stay playable.
+            from ..logging import ai_log
+            ai_log(player_id, "config_warning",
+                   message=f"unknown enumerator {enumerator_id!r}, using full")
+            enumerator_id = "full"
         enumerator = create_enumerator(enumerator_id, **enum_kw)
 
         if decider_id == "ismcts":

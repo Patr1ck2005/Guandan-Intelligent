@@ -226,3 +226,57 @@ def test_game_lock_serializes_public_api():
         assert acquired, "lock must be free outside of calls"
     finally:
         g._lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Agent timeout must not hold the session lock (audit M1: H3)
+# ---------------------------------------------------------------------------
+
+class _SlowAgent:
+    """A wedged agent: choose_play returns long after the caller's timeout
+    fired (LLM retry loops can do this)."""
+
+    def choose_play(self, view):
+        time.sleep(1.5)
+        return []
+
+
+def test_agent_timeout_releases_lock_quickly(monkeypatch):
+    """A timed-out agent must NOT block get_state for the rest of its own
+    runtime: the old with-block ran shutdown(wait=True) while the timeout
+    propagated, freezing every queued poll behind the wedged agent."""
+    import guandan.ai.registry as registry_mod
+
+    g = _fresh_game()
+    g._game_started = True
+    g.agent_timeout_ms = 150
+    monkeypatch.setattr(registry_mod, "create_agent_for_player",
+                        lambda cfg, pid: _SlowAgent())
+    monkeypatch.setattr(g, "_force_play", lambda pid, hand: [])
+
+    g._ai_running = True
+    t0 = time.time()
+    g.get_state()          # runs _step_one_ai → _ai_play(seat 1) → timeout
+    wall = time.time() - t0
+    # Timeout is 0.15s; the wedged agent sleeps 1.5s. With the fix the poll
+    # returns right after the timeout; with the bug it blocks >= 1.5s.
+    assert wall < 1.0, f"get_state blocked {wall:.2f}s behind wedged agent"
+    assert g._ai_running is False
+
+
+def test_playerview_carries_tribute_records():
+    """interactive 的 PlayerView 必须携带公开的进贡记录（与 game.py 一致），
+    否则网页对局里的 AI 比自对弈里的同一模型少一份公开信息。"""
+    from guandan.ai.player_view import PlayerView
+    from guandan.deck import Deck
+    from guandan.game_state import GameState
+    from guandan.ai.action_log import ActionLog
+    import random as _random
+
+    rng = _random.Random(11)
+    hands = Deck.deal(Deck.shuffle(Deck.create(), rng=rng))
+    state = GameState(level=2, round_number=1, hands=hands,
+                      current_player=1, trick_number=1)
+    tribute = [{"round": 1, "exchanges": [{"payer": 1, "receiver": 0}]}]
+    view = PlayerView(state, 1, ActionLog(), tribute_records=tribute)
+    assert view.tribute_public_records() == tribute

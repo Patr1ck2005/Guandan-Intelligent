@@ -86,11 +86,16 @@ class ActionLog:
 class CardTracker:
     """Derived statistics from ActionLog + own hand."""
 
-    def __init__(self, own_hand: Tuple[Card, ...], log: ActionLog, level: int = 2):
+    def __init__(self, own_hand: Tuple[Card, ...], log: ActionLog, level: int = 2,
+                 viewer_pid: int = 0):
         # All my cards
         self._my_card_ids: Set[int] = {c.id for c in own_hand}
         self._my_hand = own_hand
         self._level = level
+        # The seat whose memory this tracker represents. Opponent sets are
+        # derived from it — hardcoding [1,2,3] silently blanked seat 0's
+        # hand whenever the tracker owner sat anywhere else.
+        self._viewer_pid = viewer_pid
 
         # Cards each player has played
         self._played_by: Dict[int, Set[int]] = {0: set(), 1: set(), 2: set(), 3: set()}
@@ -105,7 +110,7 @@ class CardTracker:
                 self._pass_history.append((a.player, a.passed_on))
 
         # Remaining hand sizes from the current state (updated externally)
-        self._opp_sizes: Dict[int, int] = {1: 0, 2: 0, 3: 0}
+        self._opp_sizes: Dict[int, int] = {p: 0 for p in range(4) if p != viewer_pid}
 
     def set_opponent_sizes(self, sizes: Dict[int, int]):
         self._opp_sizes.update(sizes)
@@ -161,11 +166,11 @@ class CardTracker:
             if ids:
                 excluded.setdefault(player, set()).update(ids)
 
-        result: Dict[int, List[Card]] = {1: [], 2: [], 3: []}
+        result: Dict[int, List[Card]] = {p: [] for p in range(4) if p != self._viewer_pid}
         pool = list(unseen)
         random.shuffle(pool)
         used: Set[int] = set()
-        for pid in [1, 2, 3]:
+        for pid in result:
             size = self._opp_sizes.get(pid, 0)
             ex = excluded.get(pid)
             if ex:
@@ -179,14 +184,6 @@ class CardTracker:
             result[pid] = take
             used.update(c.id for c in take)
         return result
-
-    def did_player_pass_on_type(self, player: int, combo_type: ComboType, min_rank: int = 0) -> bool:
-        """Did this player ever pass when a combo of this type was on the table?"""
-        for p, combo in self._pass_history:
-            if p == player and combo.combo_type == combo_type:
-                if min_rank == 0 or combo.main_rank.value >= min_rank:
-                    return True
-        return False
 
     def prob_player_has_bomb(self, player: int) -> float:
         """Crude estimate: probability opponent has at least one bomb."""

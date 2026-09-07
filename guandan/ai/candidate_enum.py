@@ -79,22 +79,15 @@ class TopNEnumerator(CandidateEnumerator):
             from .scorer import score_play
             from .params import DEFAULT_PARAMS
             return score_play(c, hand, hand_after, table_combo, level, DEFAULT_PARAMS)
-        elif self.pre_scorer == "informed":
-            from .models.informed_scorer import InformedScorer
-            s = InformedScorer()
-            r = s.analyze(view)
-            for cr in r.candidates:
-                if set(cr.card_ids) == {x.id for x in c.cards}:
-                    return cr.score or 0
-            return 0
-        elif self.pre_scorer == "round":
-            from .models.round_scorer import RoundScorer
-            s = RoundScorer()
-            r = s.analyze(view)
-            for cr in r.candidates:
-                if set(cr.card_ids) == {x.id for x in c.cards}:
-                    return cr.score or 0
-            return 0
+        elif self.pre_scorer in ("informed", "round"):
+            # informed/round read view._state (all four real hands). Letting
+            # them pre-filter candidates handed the outer MC decider perfect
+            # information before any sampling — a fairness hole the default
+            # config never hit but a config panel option did. Downgrade to
+            # the blind scorer instead of honoring it.
+            from .scorer import score_play
+            from .params import DEFAULT_PARAMS
+            return score_play(c, hand, hand_after, table_combo, level, DEFAULT_PARAMS)
         return 0
 
 
@@ -116,7 +109,12 @@ def list_enumerators() -> List[str]:
 
 
 def create_enumerator(enum_id: str, **kw) -> CandidateEnumerator:
-    factory_or_cls = _ENUMERATORS.get(enum_id, FullEnumerator)
+    # Unknown ids used to silently fall back to FullEnumerator, which quietly
+    # changed what a config (e.g. regression's typo'd "fast") actually ran.
+    factory_or_cls = _ENUMERATORS.get(enum_id)
+    if factory_or_cls is None:
+        raise ValueError(f"unknown enumerator id: {enum_id!r} "
+                         f"(valid: {sorted(_ENUMERATORS)})")
     if callable(factory_or_cls) and not isinstance(factory_or_cls, type):
         return factory_or_cls()  # lazy factory
     return factory_or_cls(**kw)

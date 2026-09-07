@@ -30,15 +30,22 @@ class ConstrainedSampler:
     def sample(self, view: PlayerView) -> Dict[int, Tuple[Card, ...]]:
         tracker = view.tracker
         unseen = self._unseen(view)
+        # Opponents are everyone except the deciding seat. Hardcoding
+        # [1, 2, 3] silently blanked seat 0 in every simulation once the
+        # decider sat anywhere else (seat N treated itself as an opponent
+        # and never sampled seat 0).
+        opps = [p for p in range(4) if p != view.player_id]
 
         if tracker is None or len(tracker._pass_history) == 0:
             # No pass history — fall back to random
             return self._random_deal(unseen, view)
 
         # Build constraint map: for each player, which ranks they likely don't have
-        constrained_ranks: Dict[int, set] = {1: set(), 2: set(), 3: set()}
+        constrained_ranks: Dict[int, set] = {p: set() for p in opps}
 
         for player, passed_on in tracker._pass_history:
+            if player not in constrained_ranks:
+                continue  # the viewer's own passes don't constrain opponents
             ct = passed_on.combo_type
             rank_val = passed_on.main_rank.value
             if ct in (ComboType.SINGLE, ComboType.PAIR, ComboType.TRIPLE):
@@ -54,11 +61,11 @@ class ConstrainedSampler:
 
         # Split unseen cards into constrained and free
         free_cards: List[Card] = []
-        constrained_cards: Dict[int, List[Card]] = {1: [], 2: [], 3: []}
+        constrained_cards: Dict[int, List[Card]] = {p: [] for p in opps}
 
         for c in unseen:
             constrained = False
-            for p in [1, 2, 3]:
+            for p in opps:
                 if c.rank.value in constrained_ranks.get(p, set()):
                     constrained_cards[p].append(c)
                     constrained = True
@@ -67,14 +74,14 @@ class ConstrainedSampler:
                 free_cards.append(c)
 
         # Deal: distribute free cards randomly, constrained cards away from players
-        sizes = {p: view.opponent_hand_size(p) for p in [1, 2, 3]}
-        result: Dict[int, Tuple[Card, ...]] = {1: (), 2: (), 3: ()}
-        dealt: Dict[int, List[Card]] = {1: [], 2: [], 3: []}
+        sizes = {p: view.opponent_hand_size(p) for p in opps}
+        result: Dict[int, Tuple[Card, ...]] = {p: () for p in opps}
+        dealt: Dict[int, List[Card]] = {p: [] for p in opps}
 
         # 1. Deal free cards randomly to fill up
         random.shuffle(free_cards)
         idx = 0
-        for p in [1, 2, 3]:
+        for p in opps:
             need = sizes[p]
             if need <= 0:
                 continue
@@ -88,8 +95,8 @@ class ConstrainedSampler:
         leftover = []
         for p, cards in constrained_cards.items():
             random.shuffle(cards)
-            # Give these cards to the OTHER two players (not p)
-            others = [q for q in [1, 2, 3] if q != p]
+            # Give these cards to the OTHER opponents (not p)
+            others = [q for q in opps if q != p]
             cp_idx = 0
             for q in others:
                 remaining = sizes[q] - len(dealt.get(q, []))
@@ -101,7 +108,7 @@ class ConstrainedSampler:
 
         # 3. Fill remaining with leftover + extra unseen
         random.shuffle(leftover)
-        for p in [1, 2, 3]:
+        for p in opps:
             remaining = sizes[p] - len(dealt.get(p, []))
             if remaining > 0 and leftover:
                 take = min(remaining, len(leftover))
@@ -109,18 +116,19 @@ class ConstrainedSampler:
                 leftover = leftover[take:]
 
         # If still not enough, pad with random cards from unseen (shouldn't happen)
-        all_dealt = sum(len(d.get(p, [])) for p in [1, 2, 3])
+        all_dealt = sum(len(dealt.get(p, [])) for p in opps)
         if all_dealt < len(unseen):
-            extra = [c for c in unseen if not any(c in d.get(p, []) for p in [1, 2, 3])]
+            extra = [c for c in unseen
+                     if not any(c in dealt.get(p, []) for p in opps)]
             random.shuffle(extra)
             ei = 0
-            for p in [1, 2, 3]:
+            for p in opps:
                 remaining = sizes[p] - len(dealt.get(p, []))
                 if remaining > 0 and ei < len(extra):
                     dealt.setdefault(p, []).extend(extra[ei:ei + remaining])
                     ei += remaining
 
-        for p in [1, 2, 3]:
+        for p in opps:
             result[p] = tuple(dealt.get(p, [])[:sizes[p]])
 
         return result
@@ -136,7 +144,9 @@ class ConstrainedSampler:
         random.shuffle(pool)
         result = {}
         idx = 0
-        for p in [1, 2, 3]:
+        for p in range(4):
+            if p == view.player_id:
+                continue
             size = view.opponent_hand_size(p)
             result[p] = tuple(pool[idx:idx + size])
             idx += size

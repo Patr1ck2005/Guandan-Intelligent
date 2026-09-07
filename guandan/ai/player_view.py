@@ -52,7 +52,8 @@ class PlayerView:
 
         # Memory module
         self.action_log = action_log
-        self.tracker = (CardTracker(self.my_hand, action_log, level=state.level)
+        self.tracker = (CardTracker(self.my_hand, action_log, level=state.level,
+                                    viewer_pid=player_id)
                         if action_log else None)
         if self.tracker:
             self.tracker.set_opponent_sizes(

@@ -89,8 +89,8 @@ class Game:
                 self.team_levels[winning_team] = advance_level(
                     self.team_levels[winning_team], round_result.level_change
                 )
-        except Exception:
-            game_logger.warning("game_error", error=str(Exception))
+        except Exception as e:
+            game_logger.warning("game_error", error=f"{type(e).__name__}: {e}"[:200])
             raise
 
     def _play_round(self, starter_hint: Optional[int] = None) -> RoundResult:
