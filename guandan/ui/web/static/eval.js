@@ -71,6 +71,9 @@ async function init() {
 }
 
 function setMode(mode) {
+  // Refuse to silently kill a running job: a 10-minute tuner used to die
+  // just because the user clicked 历史.
+  if (E.jobId && mode !== E.mode && !confirm('有任务正在运行，切换页签会停止它。继续？')) return;
   // Silent cancel: clear E.jobId FIRST so the pending poll's stale-guard
   // swallows it — otherwise the "已停止" branch repaints the panel right
   // after setMode resets it (the ghost-message flash).
@@ -126,7 +129,16 @@ function addModel() {
   E.models.push({ id, label: id, params: modelDefaults(id) });
   renderModelPicker();
 }
-function rmModel(i) { E.models.splice(i, 1); renderModelPicker(); if (E.mode === 'match') renderMatchPicker(); }
+function rmModel(i) {
+  E.models.splice(i, 1);
+  // Keep A/B picks pointing at real rows — a stale index used to silently
+  // send the wrong (or a default-substituted) model for matches.
+  const last = Math.max(0, E.models.length - 1);
+  E.matchA = Math.min(E.matchA, last);
+  E.matchB = Math.min(E.matchB, last);
+  renderModelPicker();
+  if (E.mode === 'match') renderMatchPicker();
+}
 function upModel(i, k, v) { E.models[i][k] = v; renderModelPicker(); }
 function upModelParam(i, k, v) { E.models[i].params[k] = v; }
 function chgModel(i, id) {
@@ -174,11 +186,15 @@ function renderParamPanel() {
   document.getElementById('param-panel').innerHTML = h || '<span class="emp">无参数</span>';
 
   let btn = '';
-  if (E.mode === 'benchmark') btn = `<button class="btn btn-gn" onclick="runBenchmark()">运行基准</button>`;
-  else if (E.mode === 'match') btn = `<button class="btn btn-gn" onclick="runMatch()">开始自对弈</button>`;
-  else if (E.mode === 'roundrobin') btn = `<button class="btn btn-gn" onclick="runRoundRobin()">开始循环赛</button>`;
-  else if (E.mode === 'generate') btn = `<button class="btn btn-gn" onclick="runGenerate()">生成题库</button>`;
-  else if (E.mode === 'tuner') btn = `<button class="btn btn-gn" onclick="runTuner()">开始调参</button>`;
+  // The run button is disabled while a job is active — re-clicking used to
+  // POST a new job that silently cancelled the running one.
+  const runBtn = (label, fn, extra) =>
+    `<button class="btn btn-gn" onclick="${fn}()"${E.jobId ? ' disabled title="有任务正在运行"' : ''}>${label}</button>${extra || ''}`;
+  if (E.mode === 'benchmark') btn = runBtn('运行基准', 'runBenchmark');
+  else if (E.mode === 'match') btn = runBtn('开始自对弈', 'runMatch');
+  else if (E.mode === 'roundrobin') btn = runBtn('开始循环赛', 'runRoundRobin');
+  else if (E.mode === 'generate') btn = runBtn('生成题库', 'runGenerate');
+  else if (E.mode === 'tuner') btn = runBtn('开始调参', 'runTuner');
   const stop = E.jobId ? `<button class="btn btn-red" onclick="stopJob()">停止</button>` : '';
   document.getElementById('run-panel').innerHTML = `<div style="display:flex;gap:6px">${btn}${stop}</div>`;
 }
@@ -192,9 +208,12 @@ function collectModels() {
 // ==================================================================
 async function runBenchmark() {
   const el = document.getElementById('eval-result');
+  if (E.jobId) return;
+  if (!E.models.length) { el.innerHTML = '<div class="bad">请先添加至少一个模型</div>'; return; }
   el.innerHTML = '<div class="running">启动基准…</div>';
   const body = { models: collectModels(), max_scenarios: E.maxScenarios };
   const d = await postJob('/api/eval/benchmark', body, el);
+  if (!d || !d.job_id) return;   // postJob already reported the error
   startJob(d.job_id, renderBenchmark);
 }
 
@@ -223,25 +242,36 @@ function renderBenchmark(d) {
 // ==================================================================
 async function runMatch() {
   const el = document.getElementById('eval-result');
+  if (E.jobId) return;
+  if (E.models.length < 2 || E.matchA === E.matchB) {
+    el.innerHTML = '<div class="bad">自对弈需要两个不同的模型（左侧「+ 模型」添加）</div>';
+    return;
+  }
   el.innerHTML = '<div class="running">启动自对弈…</div>';
   const body = { a: collectModels()[E.matchA], b: collectModels()[E.matchB], n_games: E.nGames, seed: E.seed, agent_timeout_ms: E.timeoutMs, max_workers: E.maxWorkers };
   const d = await postJob('/api/eval/match', body, el);
+  if (!d || !d.job_id) return;
   startJob(d.job_id, renderMatch);
 }
 
 async function runRoundRobin() {
   const el = document.getElementById('eval-result');
+  if (E.jobId) return;
+  if (E.models.length < 2) { el.innerHTML = '<div class="bad">循环赛至少需要两个模型</div>'; return; }
   el.innerHTML = '<div class="running">启动循环赛…</div>';
   const body = { models: collectModels(), n_games: E.nGames, seed: E.seed, agent_timeout_ms: E.timeoutMs, max_workers: E.maxWorkers };
   const d = await postJob('/api/eval/round_robin', body, el);
+  if (!d || !d.job_id) return;
   startJob(d.job_id, renderRoundRobin);
 }
 
 async function runGenerate() {
   const el = document.getElementById('eval-result');
+  if (E.jobId) return;
   el.innerHTML = '<div class="running">生成题库中（精确解标注，可能较慢）…</div>';
   const body = { n: E.genN, max_cards: E.genMaxCards, seed: E.genSeed, time_limit_ms: E.genTimeLimit };
   const d = await postJob('/api/eval/scenarios/generate', body, el);
+  if (!d || !d.job_id) return;
   startJob(d.job_id, renderGenerate);
 }
 
@@ -251,10 +281,12 @@ async function runGenerate() {
 
 async function runTuner() {
   const el = document.getElementById('eval-result');
+  if (E.jobId) return;
   el.innerHTML = '<div class="running">启动调参（随机搜索 + 局部细化）…</div>';
   const body = { max_candidates: E.tunerCands, games_per_candidate: E.tunerGames,
                  max_seconds: E.tunerSeconds, max_workers: E.tunerWorkers, seed: E.tunerSeed };
   const d = await postJob('/api/eval/tuner', body, el);
+  if (!d || !d.job_id) return;
   startJob(d.job_id, renderTunerResult);
 }
 
@@ -275,7 +307,9 @@ function renderTunerResult(res) {
   const verdictTxt = res.verdict === 'effective' ? '<span class="badge badge-green">有效（Wilson 下界 &gt; 50%）</span>'
     : res.verdict === 'inconclusive' ? '<span class="badge badge-gray">不确定（区间跨 50%）</span>'
     : `<span class="badge badge-gray">${escapeHtml(res.verdict || '-')}</span>`;
-  let h = `<h3>调参完成</h3><div>${verdictTxt} <span class="mono">最优胜率 ${((b.win_rate || 0) * 100).toFixed(1)}% [${(b.wilson || [0, 0])[0]}–${(b.wilson || [0, 0])[1]}]（${b.wins || 0}/${b.games || 0} 局）</span></div>`;
+  const stopped = res.budget?.stopped_early
+    ? ' <span class="badge badge-gray">已按请求提前停止（非完整搜索）</span>' : '';
+  let h = `<h3>调参${res.budget?.stopped_early ? '已停止' : '完成'}</h3><div>${verdictTxt}${stopped} <span class="mono">最优胜率 ${((b.win_rate || 0) * 100).toFixed(1)}% [${(b.wilson || [0, 0])[0]}–${(b.wilson || [0, 0])[1]}]（${b.wins || 0}/${b.games || 0} 局）</span></div>`;
   h += `<div class="emp" style="text-align:left;padding:6px 0">随机搜索 + 局部细化，非全局最优；预算 ${res.budget?.elapsed_s ?? '?'}s，种子 ${res.budget?.base_seed}</div>`;
   h += '<h3>最优权重</h3><table class="ev"><tr><th>参数</th><th>取值</th><th>搜索范围</th></tr>' +
     Object.entries(b.weights || {}).map(([k, v]) =>
@@ -289,6 +323,10 @@ function renderTunerResult(res) {
 }
 
 async function applyTunerWeights() {
+  // Writing global weights with one click used to happen with no warning;
+  // the game page can also overwrite them right back from its stale
+  // in-memory config. The confirm + note make the blast radius visible.
+  if (!confirm('把调参最优权重写入 config.json？\n新权重对之后创建的对局生效；对局页的「AI设置→应用」会用其内存配置覆盖本文件。')) return;
   if (!E.lastTunerRunId) {
     // find latest tuner run
     try {
@@ -297,30 +335,44 @@ async function applyTunerWeights() {
       E.lastTunerRunId = d.run && d.run.id;
     } catch (e) { /* ignore */ }
   }
+  if (!E.lastTunerRunId) {
+    document.getElementById('eval-result').insertAdjacentHTML('beforeend',
+      '<div class="bad">没有可用的调参运行（先跑一次调参并等它入库）</div>');
+    return;
+  }
   const el = document.getElementById('eval-result');
   try {
     const r = await fetch('/api/eval/tuner/apply', { method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ run_id: E.lastTunerRunId }) });
-    const d = await r.json();
-    if (d.error) { el.innerHTML = '<div class="bad">应用失败: ' + escapeHtml(d.error) + '</div>'; return; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { el.insertAdjacentHTML('beforeend', '<div class="bad">应用失败: ' + escapeHtml(d.error || ('HTTP ' + r.status)) + '</div>'); return; }
     const rows = Object.entries(d.diff || {}).map(([k, v]) =>
       `<tr><td>${escapeHtml(k)}</td><td class="mono">${v.from}</td><td class="mono">${v.to}</td></tr>`).join('') || '<tr><td colspan="3">无变化</td></tr>';
     document.getElementById('eval-result').insertAdjacentHTML('beforeend',
-      `<h3>已应用（diff）</h3><table class="ev"><tr><th>参数</th><th>原值</th><th>新值</th></tr>${rows}</table>`);
+      `<h3>已应用（diff）</h3><table class="ev"><tr><th>参数</th><th>原值</th><th>新值</th></tr>${rows}</table>`
+      + `<div class="emp" style="padding:4px 0">${escapeHtml(d.note || '')}</div>`);
   } catch (e) {
-    el.innerHTML = '<div class="bad">应用失败: ' + escapeHtml(e.message) + '</div>';
+    el.insertAdjacentHTML('beforeend', '<div class="bad">应用失败: ' + escapeHtml(e.message) + '</div>');
   }
 }
 
 async function postJob(url, body, el) {
   try {
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    return await r.json();
-  } catch (e) { el.innerHTML = '<div class="bad">错误: ' + escapeHtml(e.message) + '</div>'; throw e; }
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) {
+      // A failed start must surface immediately — ignoring the status used
+      // to leave job_id undefined and poll /jobs/undefined for ~22s.
+      el.innerHTML = '<div class="bad">启动失败: ' + escapeHtml(d.error || ('HTTP ' + r.status)) + '</div>';
+      return null;
+    }
+    return d;
+  } catch (e) { el.innerHTML = '<div class="bad">错误: ' + escapeHtml(e.message) + '</div>'; return null; }
 }
 
 function startJob(jobId, renderFn) {
+  if (!jobId) return;
   if (E.jobTimer) { clearTimeout(E.jobTimer); E.jobTimer = null; }
   if (E.jobId && E.jobId !== jobId) {
     // A previous job was still running — best-effort cancel it.
@@ -329,6 +381,7 @@ function startJob(jobId, renderFn) {
   E.jobId = jobId;
   E.jobStart = Date.now();
   E.jobRetries = 0;
+  E.jobRenderFn = renderFn || null;
   renderParamPanel();       // show the stop button
   pollJob(jobId, renderFn);
 }
@@ -337,29 +390,40 @@ function finishJob() {
   E.jobId = null;
   E.jobStart = null;
   E.jobRetries = 0;
+  E.jobRenderFn = null;
   renderParamPanel();       // hide the stop button
 }
 
 async function stopJob() {
   if (!E.jobId) return;
   const jobId = E.jobId;
+  const renderFn = E.jobRenderFn;
   try {
     await fetch('/api/eval/jobs/' + jobId + '/cancel', { method: 'POST' });
   } catch (e) { /* server may be slow; still mark stopping */ }
   const el = document.getElementById('eval-result');
   el.innerHTML = '<div class="running">正在停止…（当前局完成即中止）</div>';
-  E.jobTimer = setTimeout(() => pollJob(jobId, null), 1000);
+  E.jobTimer = setTimeout(() => pollJob(jobId, renderFn), 1000);
 }
 
 async function pollJob(jobId, renderFn) {
   if (E.jobId !== jobId) return;   // stale poll — a newer job took over
   try {
     const r = await fetch('/api/eval/jobs/' + jobId);
+    if (r.status === 404) {
+      // Terminal: the job registry dropped it — retrying used to grind for
+      // ~22s before a misleading "轮询错误: HTTP 404".
+      document.getElementById('eval-result').innerHTML = '<div class="bad">任务不存在（服务器已重启或任务过期）</div>';
+      finishJob();
+      return;
+    }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (E.jobId !== jobId) return; // superseded while awaiting
+    E.jobRetries = 0;              // reset on any successful poll
     if (d.status === 'done') {
       if (renderFn) renderFn(d.result);
+      else document.getElementById('eval-result').innerHTML = '<div class="ok">任务已完成（结果已入历史）</div>';
       finishJob();
       return;
     }
@@ -584,7 +648,7 @@ function renderMatch(m) {
   let h = `<h3>自对弈结果</h3><div>${escapeHtml(aName)} ${aw} : ${bw} ${escapeHtml(bName)}（${n} 局，${m.elapsed_s}s）</div>`;
   h += '<div style="color:#888;font-size:0.78em">真实参数：' + escapeHtml(JSON.stringify({ a: m.a, b: m.b, n_games: n })) + '</div>';
   h += '<table class="ev"><tr><th>#</th><th>种子</th><th>胜方</th><th>局数</th></tr>' +
-    (m.games || []).map((g, i) => `<tr><td>${i + 1}</td><td>${g.seed}</td><td>${g.winning_team === 0 ? aName : bName}</td><td>${g.rounds_played}</td></tr>`).join('') + '</table>';
+    (m.games || []).map((g, i) => `<tr><td>${i + 1}</td><td>${g.seed}</td><td>${g.winning_team === 0 ? escapeHtml(aName) : g.winning_team === 1 ? escapeHtml(bName) : '<span style="color:#e67e22">出错</span>'}</td><td>${g.rounds_played}</td></tr>`).join('') + '</table>';
   document.getElementById('eval-result').innerHTML = h;
 }
 
@@ -632,7 +696,7 @@ async function renderHistory() {
   h += '<h3>A / B 对比</h3><div style="display:flex;gap:8px;align-items:center">' +
     `<select id="hist-cmp-a" onchange="renderHistCompare()">${opts}</select>` +
     '<span>vs</span>' +
-    `<select id="hist-cmp-b" onchange="renderHistCompare()">${opts.replace('option value="' + ids[1], 'option selected value="' + ids[1])}</select>` +
+    `<select id="hist-cmp-b" onchange="renderHistCompare()">${ids.map((id, i) => `<option value="${id}"${i === 1 ? ' selected' : ''}>#${id}</option>`).join('')}</select>` +
     '</div><div id="hist-compare"></div>';
   h += '<h3>全部记录</h3><table class="ev"><tr><th>#</th><th>时间(UTC)</th><th>类型</th><th>关键指标</th><th>git</th><th></th></tr>' +
     runs.map(r => `<tr class="hrow" onclick="renderRunDetail(${r.id})">
@@ -662,10 +726,15 @@ async function loadRegressionSection() {
     const verdict = d.verdict || 'unknown';
     const badge = verdict === 'green' ? '<span class="badge badge-green">回归通过 ✓</span>'
       : verdict === 'red' ? '<span class="badge badge-red">回归异常 ✗</span>'
+      : verdict === 'no-baseline' ? '<span class="badge badge-gray">无基线</span>'
+      : verdict === 'no-comparable-metrics' ? '<span class="badge badge-gray">无可比指标</span>'
       : `<span class="badge badge-gray">${escapeHtml(verdict)}</span>`;
+    const baseNote = d.baseline_run_id
+      ? `<span class="mono" style="color:#888">当前基线 #${d.baseline_run_id}</span>` : '';
     box.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       ${badge}
       <span class="mono">#${d.run.id} · ${escapeHtml(d.run.ts_utc || '')}</span>
+      ${baseNote}
       <button class="btn btn-gn" onclick="runRegression()">重跑</button>
       <button class="btn btn-gy" onclick="saveRegressionBaseline(${d.run.id})">存为基线</button>
       <a class="btn btn-gy" href="/api/eval/export/${d.run.id}?format=html" target="_blank">报告</a>
@@ -679,13 +748,15 @@ function runRegression() {
   const el = document.getElementById('eval-result');
   el.innerHTML = '<div class="running">启动回归套件（基准 + 固定 seed 自对弈）…</div>';
   postJob('/api/eval/regression', {}, el)
-    .then(d => startJob(d.job_id, renderRegressionResult));
+    .then(d => { if (d && d.job_id) startJob(d.job_id, renderRegressionResult); });
 }
 
 function renderRegressionResult(res) {
   const verdict = res.verdict || 'unknown';
   const badge = verdict === 'green' ? '<span class="badge badge-green">回归通过 ✓</span>'
     : verdict === 'red' ? '<span class="badge badge-red">回归异常 ✗</span>'
+    : verdict === 'no-baseline' ? '<span class="badge badge-gray">无基线 — 尚未保存任何基线，先「存为基线」</span>'
+    : verdict === 'no-comparable-metrics' ? '<span class="badge badge-gray">无可比指标 — 基线与当前模型键不匹配，不能算通过</span>'
     : `<span class="badge badge-gray">${escapeHtml(verdict)}</span>`;
   const breaches = (res.compare && res.compare.breaches) || [];
   let h = `<h3>回归结果</h3><div>${badge} <span class="mono">对比基线 #${res.baseline_run_id ?? '-'}</span></div>`;
@@ -714,8 +785,15 @@ async function saveRegressionBaseline(runId) {
     } catch (e) { /* fallthrough */ }
   }
   if (!runId) return;
-  await fetch('/api/eval/regression/baseline', { method: 'POST',
-    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }) });
+  try {
+    const r = await fetch('/api/eval/regression/baseline', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) {
+      const el = document.getElementById('eval-result');
+      if (el) el.insertAdjacentHTML('beforeend', '<div class="bad">保存基线失败: ' + escapeHtml(d.error || ('HTTP ' + r.status)) + '</div>');
+    }
+  } catch (e) { /* network error — section reload will show the old state */ }
   loadRegressionSection();
 }
 
@@ -733,6 +811,7 @@ function histMetricPreview(r) {
     return rk.map(x => `${(x.model && (x.model.label || x.model.id)) || '?'} ${x.rating}`).join(' · ') || '-';
   }
   if (r.kind === 'regression') return s.verdict ? ('回归: ' + s.verdict) : '-';
+  if (r.kind === 'generate') return `生成 ${s.generated ?? '?'} 条场景`;
   return Object.keys(s).slice(0, 3).map(k => `${k}=${JSON.stringify(s[k]).slice(0, 30)}`).join(' · ') || '-';
 }
 

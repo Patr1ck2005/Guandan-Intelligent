@@ -47,19 +47,26 @@ def test_log_negative_count_is_clamped(client):
 # /api/config — bad player keys and null params must not 500 (probe B)
 # ---------------------------------------------------------------------------
 
-def test_config_bad_player_key_returns_400(client):
+def test_config_bad_player_key_returns_400(client, tmp_path, monkeypatch):
+    from guandan.ui.web import app as webapp
+    monkeypatch.setattr(webapp, "_CONFIG_PATH", tmp_path / "config.json")
     r = _post_json(client, "/api/config",
                    {"players": {"not-a-number": {"decider": "blind"}}})
     assert r.status_code == 400
     assert "error" in r.get_json()
 
 
-def test_config_out_of_range_player_returns_400(client):
+def test_config_out_of_range_player_returns_400(client, tmp_path, monkeypatch):
+    from guandan.ui.web import app as webapp
+    monkeypatch.setattr(webapp, "_CONFIG_PATH", tmp_path / "config.json")
     r = _post_json(client, "/api/config", {"players": {"9": {"decider": "blind"}}})
     assert r.status_code == 400
 
 
-def test_config_null_params_are_stripped(client):
+def test_config_null_params_are_stripped(client, tmp_path, monkeypatch):
+    from guandan.ui.web import app as webapp
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setattr(webapp, "_CONFIG_PATH", cfg_file)
     r = _post_json(client, "/api/config",
                    {"players": {"1": {"decider": "blind",
                                       "params": {"pass_threshold": None}}}})
@@ -67,9 +74,16 @@ def test_config_null_params_are_stripped(client):
     body = client.get("/api/config").get_json()
     params = body["config"]["players"]["1"].get("params", {})
     assert "pass_threshold" not in params or params["pass_threshold"] is not None
+    # the on-disk snapshot (isolated to tmp) must be null-free too
+    if cfg_file.exists():
+        disk = json.loads(cfg_file.read_text(encoding="utf-8"))
+        params_disk = disk["players"]["1"]["params"] or {}
+        assert "pass_threshold" not in params_disk
 
 
-def test_config_players_not_dict_returns_400(client):
+def test_config_players_not_dict_returns_400(client, tmp_path, monkeypatch):
+    from guandan.ui.web import app as webapp
+    monkeypatch.setattr(webapp, "_CONFIG_PATH", tmp_path / "config.json")
     r = _post_json(client, "/api/config", {"players": [1, 2, 3]})
     assert r.status_code == 400
 

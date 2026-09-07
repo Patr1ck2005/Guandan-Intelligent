@@ -33,9 +33,47 @@ _JOB_LIMIT = 50             # keep at most this many jobs (evict terminal first)
 _DETAIL_LIMIT = 256 * 1024  # live detail larger than this is replaced by a stub
 _STALL_AFTER_S = 10 * 60    # running job without heartbeat for 10 min -> stalled
 
+# The threaded dev server can run a poll and a run-click concurrently;
+# _cleanup_jobs iterates the dict, so every mutation needs this lock.
+_JOBS_LOCK = threading.RLock()
+
+# config.json is written from two endpoints (game page /api/config POST and
+# tuner apply). One process-wide lock + atomic replace prevents lost updates
+# and truncated files.
+_CONFIG_WRITE_LOCK = threading.RLock()
+
+_MAX_WORKERS_CAP = 8        # match/RR process pool cap (tuner already clamps)
+
+
+def _to_int(v, dflt, lo=None, hi=None):
+    """Garbage-tolerant int coercion with optional clamping."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        n = dflt
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def _to_float(v, dflt, lo=None, hi=None):
+    try:
+        f = float(v)
+        if f != f or f in (float("inf"), float("-inf")):
+            f = dflt
+    except (TypeError, ValueError):
+        f = dflt
+    if lo is not None:
+        f = max(lo, f)
+    if hi is not None:
+        f = min(hi, f)
+    return f
+
 
 def _cleanup_jobs():
-    """TTL sweep + stall watchdog + cap enforcement.
+    """TTL sweep + stall watchdog + cap enforcement (call under _JOBS_LOCK).
 
     Fix vs previous behavior: the TTL used to expire jobs by started_at,
     which deleted legitimately long-running jobs past 30 min. Now:
@@ -81,21 +119,22 @@ class JobCancelled(JobInterrupted):
 
 
 def _new_job(kind: str = "generic") -> str:
-    # Single-active-job policy: CPU-bound games share the GIL, so piling up
-    # concurrent jobs starves every one of them (the "stuck" symptom).
-    # Starting a new job cancels all still-running ones.
-    for jid, j in _jobs.items():
-        if j["status"] in ("running", "cancelling"):
-            j["cancel"] = True
-            j["status"] = "cancelling"
-            j["message"] = "被新任务取代，正在停止…"
-    _cleanup_jobs()
-    jid = uuid.uuid4().hex
-    _jobs[jid] = {"status": "running", "progress": 0.0, "message": "",
-                  "detail": {}, "cancel": False, "result": None, "error": None,
-                  "kind": kind, "heartbeat": time.time(),
-                  "started_at": time.time(), "finished_at": None}
-    return jid
+    with _JOBS_LOCK:
+        # Single-active-job policy: CPU-bound games share the GIL, so piling
+        # up concurrent jobs starves every one of them (the "stuck" symptom).
+        # Starting a new job cancels all still-running ones.
+        for jid, j in _jobs.items():
+            if j["status"] in ("running", "cancelling"):
+                j["cancel"] = True
+                j["status"] = "cancelling"
+                j["message"] = "被新任务取代，正在停止…"
+        _cleanup_jobs()
+        jid = uuid.uuid4().hex
+        _jobs[jid] = {"status": "running", "progress": 0.0, "message": "",
+                      "detail": {}, "cancel": False, "result": None, "error": None,
+                      "kind": kind, "heartbeat": time.time(),
+                      "started_at": time.time(), "finished_at": None}
+        return jid
 
 
 def _set_progress(job_id: str, progress: float, message: str):
@@ -155,7 +194,12 @@ def _spawn(jid: str, fn):
                 kind = _jobs[jid].get("kind", "generic")
                 params = _jobs[jid].get("params") or {}
                 from .store import store_run
-                _jobs[jid]["run_id"] = store_run(kind, params, result)
+                seed = params.get("seed")
+                if isinstance(seed, (int, float)) and seed == int(seed):
+                    seed = int(seed)
+                else:
+                    seed = None
+                _jobs[jid]["run_id"] = store_run(kind, params, result, seed=seed)
             except Exception:
                 pass
         except JobCancelled:
@@ -207,12 +251,12 @@ def list_scenarios():
 
 @eval_bp.route("/api/eval/scenarios/generate", methods=["POST"])
 def generate_scenarios():
-    data = request.get_json() or {}
-    n = int(data.get("n", 50))
-    level = int(data.get("level", 2))
-    max_cards = int(data.get("max_cards", 4))
-    seed = int(data.get("seed", 0))
-    time_limit_ms = int(data.get("time_limit_ms", 5000))
+    data = request.get_json(silent=True) or {}
+    n = _to_int(data.get("n", 50), 50, lo=1, hi=500)
+    level = _to_int(data.get("level", 2), 2, lo=2, hi=14)
+    max_cards = _to_int(data.get("max_cards", 4), 4, lo=1, hi=8)
+    seed = _to_int(data.get("seed", 0), 0)
+    time_limit_ms = _to_int(data.get("time_limit_ms", 5000), 5000, lo=100, hi=60000)
 
     jid = _new_job("generate")
     _jobs[jid]["params"] = {"n": n, "level": level, "max_cards": max_cards,
@@ -233,16 +277,20 @@ def generate_scenarios():
 
 @eval_bp.route("/api/eval/benchmark", methods=["POST"])
 def benchmark():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     model_profiles = data.get("models", [{"id": "blind"}])
+    if not isinstance(model_profiles, list) or not model_profiles:
+        return jsonify({"error": "models must be a non-empty list"}), 400
     category = data.get("category")
     source = data.get("source")
     difficulty = data.get("difficulty")
-    max_scenarios = int(data.get("max_scenarios", 0))  # 0 = all
+    max_scenarios = _to_int(data.get("max_scenarios", 0), 0, lo=0, hi=100000)
 
     scenarios = get_bank().filter(category=category, source=source, difficulty=difficulty)
     if max_scenarios:
         scenarios = scenarios[:max_scenarios]
+    if not scenarios:
+        return jsonify({"error": "题库中没有匹配的场景（调整筛选或先生成题库）"}), 400
 
     jid = _new_job("benchmark")
     _jobs[jid]["params"] = {"models": model_profiles, "category": category,
@@ -259,13 +307,15 @@ def benchmark():
 
 @eval_bp.route("/api/eval/match", methods=["POST"])
 def match():
-    data = request.get_json() or {}
-    profile_a = data.get("a") or {"id": "blind"}
-    profile_b = data.get("b") or {"id": "mc"}
-    n_games = int(data.get("n_games", 10))
-    base_seed = int(data.get("seed", 0))
-    agent_timeout_ms = float(data.get("agent_timeout_ms", 75000))
-    max_workers = int(data.get("max_workers", 1))
+    data = request.get_json(silent=True) or {}
+    profile_a = data.get("a")
+    profile_b = data.get("b")
+    if not isinstance(profile_a, dict) or not isinstance(profile_b, dict):
+        return jsonify({"error": "对战双方配置缺失（a/b 必须都是对象）"}), 400
+    n_games = _to_int(data.get("n_games", 10), 10, lo=1, hi=2000)
+    base_seed = _to_int(data.get("seed", 0), 0)
+    agent_timeout_ms = max(1000.0, _to_float(data.get("agent_timeout_ms", 75000), 75000.0))
+    max_workers = _to_int(data.get("max_workers", 1), 1, lo=1, hi=_MAX_WORKERS_CAP)
 
     jid = _new_job("match")
     _jobs[jid]["params"] = {"a": profile_a, "b": profile_b, "n_games": n_games,
@@ -283,12 +333,14 @@ def match():
 
 @eval_bp.route("/api/eval/round_robin", methods=["POST"])
 def round_robin():
-    data = request.get_json() or {}
-    profiles = data.get("models") or [{"id": "blind"}, {"id": "mc"}]
-    n_games = int(data.get("n_games", 10))
-    base_seed = int(data.get("seed", 0))
-    agent_timeout_ms = float(data.get("agent_timeout_ms", 75000))
-    max_workers = int(data.get("max_workers", 1))
+    data = request.get_json(silent=True) or {}
+    profiles = data.get("models")
+    if not isinstance(profiles, list) or len(profiles) < 2:
+        return jsonify({"error": "循环赛至少需要两个模型"}), 400
+    n_games = _to_int(data.get("n_games", 10), 10, lo=1, hi=2000)
+    base_seed = _to_int(data.get("seed", 0), 0)
+    agent_timeout_ms = max(1000.0, _to_float(data.get("agent_timeout_ms", 75000), 75000.0))
+    max_workers = _to_int(data.get("max_workers", 1), 1, lo=1, hi=_MAX_WORKERS_CAP)
 
     jid = _new_job("round_robin")
     _jobs[jid]["params"] = {"models": profiles, "n_games": n_games,
@@ -306,36 +358,40 @@ def round_robin():
 
 @eval_bp.route("/api/eval/jobs/<job_id>")
 def job_status(job_id):
-    _cleanup_jobs()
-    job = _jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify({
-        "job_id": job_id,
-        "status": job["status"],
-        "progress": job["progress"],
-        "message": job.get("message", ""),
-        "detail": job.get("detail") or {},
-        "result": job["result"],
-        "error": job["error"],
-        "kind": job.get("kind", "generic"),
-        "started_at": job.get("started_at"),
-        "finished_at": job.get("finished_at"),
-        "detail_truncated": bool(job.get("detail_truncated")),
-        "run_id": job.get("run_id"),
-    })
+    with _JOBS_LOCK:
+        _cleanup_jobs()
+        job = _jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        payload = {
+            "job_id": job_id,
+            "status": job["status"],
+            "progress": job["progress"],
+            "message": job.get("message", ""),
+            "detail": job.get("detail") or {},
+            "result": job["result"],
+            "error": job["error"],
+            "kind": job.get("kind", "generic"),
+            "started_at": job.get("started_at"),
+            "finished_at": job.get("finished_at"),
+            "detail_truncated": bool(job.get("detail_truncated")),
+            "run_id": job.get("run_id"),
+        }
+    return jsonify(payload)
 
 
 @eval_bp.route("/api/eval/jobs/<job_id>/cancel", methods=["POST"])
 def cancel_job(job_id):
-    job = _jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    job["cancel"] = True
-    if job["status"] == "running":
-        job["status"] = "cancelling"
-        job["message"] = "正在停止…"
-    return jsonify({"job_id": job_id, "status": job["status"]})
+    with _JOBS_LOCK:
+        job = _jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        job["cancel"] = True
+        if job["status"] == "running":
+            job["status"] = "cancelling"
+            job["message"] = "正在停止…"
+        status = job["status"]
+    return jsonify({"job_id": job_id, "status": status})
 
 
 # ------------------------------------------------------------------
@@ -350,6 +406,7 @@ def history():
         limit = min(int(request.args.get("limit", 50)), 200)
     except ValueError:
         limit = 50
+    limit = max(1, limit)
     return jsonify({"runs": list_runs(kind=kind, limit=limit)})
 
 
@@ -382,7 +439,38 @@ def export_run(run_id):
                      f"attachment; filename=guandan_run_{run_id}.json"})
     if fmt == "csv":
         lines = ["model_id,model_name,accuracy,elo,wins,losses,avg_ms"]
-        for m in run.get("models", []):
+        rows = list(run.get("models") or [])
+        if not rows:
+            # benchmark/tuner/regression/generate keep their per-model data in
+            # the summary — synthesize rows so the CSV is not just a header.
+            summary = run.get("summary") or {}
+            entries = summary.get("summary") if isinstance(summary.get("summary"), list) else []
+            if not entries and isinstance(summary.get("models"), list):
+                entries = summary["models"]
+            if not entries and run.get("kind") == "benchmark":
+                entries = summary.get("models") or []
+            for i, s in enumerate(entries or []):
+                rows.append({
+                    "model_id": s.get("model") or s.get("model_id") or f"model_{i + 1}",
+                    "model_name": s.get("model_name") or s.get("model") or f"model_{i + 1}",
+                    "accuracy": s.get("accuracy"),
+                    "elo": s.get("elo") or s.get("rating"),
+                    "wins": s.get("correct") if s.get("wins") is None else s.get("wins"),
+                    "losses": (s.get("total", 0) - s.get("correct", 0))
+                              if s.get("wins") is None and s.get("total") is not None else s.get("losses"),
+                    "avg_ms": s.get("avg_ms"),
+                })
+            if not rows and run.get("kind") == "match":
+                s = run.get("summary") or {}
+                rows.append({"model_id": "A", "model_name": "A",
+                             "accuracy": None, "elo": None,
+                             "wins": s.get("a_wins"), "losses": s.get("b_wins"),
+                             "avg_ms": None})
+                rows.append({"model_id": "B", "model_name": "B",
+                             "accuracy": None, "elo": None,
+                             "wins": s.get("b_wins"), "losses": s.get("a_wins"),
+                             "avg_ms": None})
+        for m in rows:
             lines.append(",".join(str(x) if x is not None else ""
                                   for x in [m.get("model_id"),
                                             _csv_escape(m.get("model_name")),
@@ -459,9 +547,9 @@ def _h(v) -> str:
 @eval_bp.route("/api/eval/regression", methods=["POST"])
 def run_regression():
     from .regression import run_regression_suite
-    data = request.get_json() or {}
-    match_n = max(1, min(int(data.get("match_n_games", 3)), 10))
-    base_seed = int(data.get("seed", 4242))
+    data = request.get_json(silent=True) or {}
+    match_n = _to_int(data.get("match_n_games", 3), 3, lo=1, hi=10)
+    base_seed = _to_int(data.get("seed", 4242), 4242)
 
     jid = _new_job("regression")
     _jobs[jid]["params"] = {"match_n_games": match_n, "seed": base_seed,
@@ -477,21 +565,31 @@ def run_regression():
 
 @eval_bp.route("/api/eval/regression/latest")
 def regression_latest():
-    from .store import list_runs
+    from .store import get_baseline, list_runs
     runs = list_runs(kind="regression", limit=1)
     if not runs:
-        return jsonify({"run": None})
+        return jsonify({"run": None, "baseline_run_id": None})
     r = runs[0]
-    return jsonify({"run": r, "verdict": (r.get("summary") or {}).get("verdict")})
+    baseline = get_baseline("regression")
+    return jsonify({"run": r,
+                    "verdict": (r.get("summary") or {}).get("verdict"),
+                    "baseline_run_id": baseline.get("id") if baseline else None})
 
 
 @eval_bp.route("/api/eval/regression/baseline", methods=["POST"])
 def regression_save_baseline():
-    from .store import save_baseline
-    data = request.get_json() or {}
-    run_id = int(data.get("run_id", 0))
+    from .store import get_run, save_baseline
+    data = request.get_json(silent=True) or {}
+    run_id = _to_int(data.get("run_id", 0), 0)
     if not run_id:
         return jsonify({"error": "run_id required"}), 400
+    run = get_run(run_id)
+    if run is None:
+        return jsonify({"error": "run not found"}), 404
+    # Marking a benchmark/match run as baseline used to succeed silently and
+    # then be ignored by the regression comparison (kind filter) — reject it.
+    if run.get("kind") != "regression":
+        return jsonify({"error": f"只有回归运行可设为基线（#{run_id} 的类型是 {run.get('kind')}）"}), 400
     ok = save_baseline(run_id)
     if not ok:
         return jsonify({"error": "run not found"}), 404
@@ -505,14 +603,18 @@ def regression_save_baseline():
 @eval_bp.route("/api/eval/tuner", methods=["POST"])
 def tuner():
     from .tuner import TunerBudget, run_tuner
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     budget = TunerBudget(
-        max_candidates=int(data.get("max_candidates", 12)),
-        games_per_candidate=int(data.get("games_per_candidate", 8)),
-        max_seconds=float(data.get("max_seconds", 600)),
-        max_workers=int(data.get("max_workers", 2)),
-        base_seed=int(data.get("seed", 7000)),
+        max_candidates=_to_int(data.get("max_candidates", 12), 12, lo=1, hi=60),
+        games_per_candidate=_to_int(data.get("games_per_candidate", 8), 8, lo=1, hi=60),
+        max_seconds=_to_float(data.get("max_seconds", 600), 600.0, lo=30.0, hi=3600.0),
+        max_workers=_to_int(data.get("max_workers", 2), 2, lo=1, hi=8),
+        base_seed=_to_int(data.get("seed", 7000), 7000),
     )
+    # Clamp up-front so the persisted params snapshot records what will
+    # actually run (the honest-params rule) — the job thread clamps again
+    # (idempotent) for safety.
+    budget.clamp()
     jid = _new_job("tuner")
     _jobs[jid]["params"] = {
         "budget": {"max_candidates": budget.max_candidates,
@@ -541,17 +643,25 @@ def tuner_best():
                     "best": (runs[0].get("summary") or {}).get("best")})
 
 
+def _config_json_path() -> str:
+    """Project-root config.json (module function so tests can isolate it)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "config.json")
+
+
 @eval_bp.route("/api/eval/tuner/apply", methods=["POST"])
 def tuner_apply():
     """Write the tuner's best AIParams weights into config.json (blind model).
 
-    Returns the applied diff. Refuses when weights are absent. Config POST
-    semantics elsewhere string-key players; this only touches
-    decider.model_params.blind (the model-level defaults).
+    Returns the applied diff. Refuses when weights are absent, when the run
+    is not a tuner run, or when weight keys fall outside the tuner search
+    space (no arbitrary-key injection into config.json).
     """
     import json as _json
-    from .store import list_runs
-    data = request.get_json() or {}
+    import tempfile
+    from .store import list_runs, get_run
+    from .tuner import SEARCH_SPACE
+    data = request.get_json(silent=True) or {}
     run_id = data.get("run_id")
     weights = data.get("weights")
     if not weights and run_id:
@@ -563,25 +673,53 @@ def tuner_apply():
     if not weights:
         return jsonify({"error": "no weights provided or found"}), 400
 
-    cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))), "config.json")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            cfg = _json.load(f)
-        before = dict(cfg.get("decider", {}).get("model_params", {}).get("blind", {}))
-        blind_params = cfg.setdefault("decider", {}).setdefault(
-            "model_params", {}).setdefault("blind", {})
-        blind_params.update(weights)
-        # keep inner blind in sync (BlindAgent is used as inner model too)
-        cfg.setdefault("inner_model", {}).setdefault(
-            "model_params", {}).setdefault("blind", {}).update(weights)
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            _json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return jsonify({"error": f"config write failed: {e}"}), 500
-    diff = {k: {"from": before.get(k), "to": v} for k, v in weights.items()
+    if run_id:
+        run = get_run(run_id)
+        if run is None:
+            return jsonify({"error": "run not found"}), 404
+        if run.get("kind") != "tuner":
+            return jsonify({"error": f"run #{run_id} 不是调参运行（kind={run.get('kind')}）"}), 400
+
+    if not isinstance(weights, dict):
+        return jsonify({"error": "weights must be an object"}), 400
+    unknown = [k for k in weights if k not in SEARCH_SPACE]
+    if unknown:
+        return jsonify({"error": f"权重键不在调参搜索空间内: {', '.join(sorted(unknown))}"}), 400
+    clean_weights = {}
+    for k, v in weights.items():
+        lo, hi = SEARCH_SPACE[k]
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"权重 {k} 不是数值"}), 400
+        clean_weights[k] = round(min(hi, max(lo, fv)), 3)
+
+    cfg_path = _config_json_path()
+    # Single-writer guard: the game page's /api/config POST writes the same
+    # file from another thread; serialize read-modify-write cycles and write
+    # atomically (temp file + os.replace) so a crash cannot truncate it.
+    with _CONFIG_WRITE_LOCK:
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = _json.load(f)
+            before = dict(cfg.get("decider", {}).get("model_params", {}).get("blind", {}))
+            blind_params = cfg.setdefault("decider", {}).setdefault(
+                "model_params", {}).setdefault("blind", {})
+            blind_params.update(clean_weights)
+            # keep inner blind in sync (BlindAgent is used as inner model too)
+            cfg.setdefault("inner_model", {}).setdefault(
+                "model_params", {}).setdefault("blind", {}).update(clean_weights)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(cfg_path), suffix=".json.tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                _json.dump(cfg, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, cfg_path)
+        except Exception as e:
+            return jsonify({"error": f"config write failed: {e}"}), 500
+    diff = {k: {"from": before.get(k), "to": v} for k, v in clean_weights.items()
             if before.get(k) != v}
-    return jsonify({"applied": True, "diff": diff})
+    return jsonify({"applied": True, "diff": diff,
+                    "note": "新权重对之后创建的对局生效（当前对局沿用旧参数）"})
 
 
 # ------------------------------------------------------------------

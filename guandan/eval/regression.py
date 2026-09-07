@@ -89,8 +89,13 @@ def compare_metrics(current: dict, baseline: dict) -> dict:
                 "delta_pp": round(delta, 1),
                 "tolerance_pp": WIN_TOLERANCE_PP,
             })
+    verdict = "green" if not breaches else "red"
+    if checked == 0:
+        # Zero comparable metrics (e.g. baseline stored under different model
+        # keys) — "green" here would be a false pass.
+        verdict = "no-comparable-metrics"
     return {
-        "verdict": "green" if not breaches else "red",
+        "verdict": verdict,
         "breaches": breaches,
         "metrics_checked": checked,
     }
@@ -112,10 +117,26 @@ def run_regression_suite(progress_cb=None, live_cb=None,
     bench = run_scenario_benchmark(load_curated_scenarios(), REFERENCE_PROFILES,
                                    progress_cb=progress_cb, live_cb=live_cb)
 
-    _p(60, 100, "回归套件 · 固定 seed 自对弈（blind vs blind）…")
+    # Keep progress monotonic: the match phase owns 60..100 (scaled
+    # per-game); the fixed 60 marker previously froze the bar for the whole
+    # phase. progress_cb also carries the cancel check into run_match, so
+    # 停止 takes effect during phase 2 (it used to be a silent no-op there).
+    base = 60.0
+    span = 40.0
+
+    def _match_progress(done, total, msg):
+        frac = (done / total) if total else 1.0
+        _p(int(base + frac * span),
+           100, f"回归套件 · 自对弈 {done}/{total} 局 · {msg}")
+
+    def _match_live(detail):
+        if live_cb:
+            live_cb(detail)
+
     match = run_match({"id": "blind"}, {"id": "blind"},
                       n_games=match_n_games, base_seed=base_seed,
-                      agent_timeout_ms=75000, max_workers=1)
+                      agent_timeout_ms=75000, max_workers=1,
+                      progress_cb=_match_progress, live_cb=_match_live)
 
     current = collect_metrics(bench, match.to_dict())
     baseline_run = store.get_baseline("regression")

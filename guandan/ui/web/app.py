@@ -412,10 +412,19 @@ def api_config():
                         game.config["players"][p] = _strip_nones(cfg)
             if "auto_play" in data:
                 game._auto_play = bool(data["auto_play"])
-            try:
-                _CONFIG_PATH.write_text(json.dumps(game.config, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+            # Same lock + atomic write as the tuner apply endpoint — two
+            # unsynchronized writers used to clobber each other's changes.
+            from ...eval.eval_api import _CONFIG_WRITE_LOCK
+            import tempfile as _tempfile
+            with _CONFIG_WRITE_LOCK:
+                try:
+                    fd, tmp = _tempfile.mkstemp(
+                        dir=str(_CONFIG_PATH.parent), suffix=".json.tmp")
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(game.config, indent=2))
+                    os.replace(tmp, _CONFIG_PATH)
+                except OSError:
+                    pass
     from ...ai.registry import get_schema
     schema = get_schema()
     return jsonify({"config": game.config, "schema": schema})

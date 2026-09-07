@@ -128,17 +128,103 @@ def grade_difficulty(correct_fraction_by_id: Dict[str, float],
 
 
 class ScenarioBank:
-    """In-memory scenario library with filtering and metadata."""
+    """In-memory scenario library with filtering and metadata.
+
+    Synthetic scenarios are persisted to ``data/scenario_bank.json`` on
+    every add and reloaded at startup — previously a generated 题库
+    evaporated on server restart (only buried inside history rows).
+    """
 
     def __init__(self, scenarios: Optional[List[Scenario]] = None):
         self._scenarios: List[Scenario] = list(scenarios or [])
         self._by_id = {s.id: s for s in self._scenarios}
+        self._load_persisted()
+
+    # ---- persistence (synthetic scenarios only) ----
+
+    def _persist_path(self):
+        import os
+        base = os.environ.get("GUANDAN_SCENARIO_BANK")
+        if base:
+            return base
+        return os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "data", "scenario_bank.json")
+
+    def _load_persisted(self):
+        import json
+        path = self._persist_path()
+        try:
+            import os
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            restored = []
+            for d in items:
+                try:
+                    s = Scenario(
+                        id=d["id"], name=d["name"], category=d["category"],
+                        description=d.get("description", ""),
+                        hand=list(d["hand"]),
+                        table=d.get("table"), table_player=d.get("table_player", 1),
+                        level=d.get("level", 2),
+                        opponents={int(k): list(v) for k, v in (d.get("opponents") or {}).items()},
+                        played_cards=list(d.get("played_cards") or []),
+                        expected_play=d.get("expected_play"),
+                        expected_pass=bool(d.get("expected_pass")),
+                        reasoning=d.get("reasoning", ""),
+                        source=d.get("source", "synthetic"),
+                        ground_truth=d.get("ground_truth", "exact"),
+                        difficulty=d.get("difficulty", ""),
+                        tags=list(d.get("tags") or []),
+                    )
+                    restored.append(s)
+                except Exception:
+                    continue
+            self.add(restored)
+        except Exception:
+            pass  # a broken file must never block startup
+
+    def _persist(self):
+        import json
+        import os
+        path = self._persist_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            items = []
+            for s in self._scenarios:
+                if s.source == "curated":
+                    continue  # curated come from code; only synthetic persist
+                items.append({
+                    "id": s.id, "name": s.name, "category": s.category,
+                    "description": s.description, "hand": list(s.hand),
+                    "table": s.table, "table_player": s.table_player,
+                    "level": s.level,
+                    "opponents": {str(k): list(v) for k, v in s.opponents.items()},
+                    "played_cards": list(s.played_cards),
+                    "expected_play": s.expected_play,
+                    "expected_pass": s.expected_pass,
+                    "reasoning": s.reasoning,
+                    "source": s.source, "ground_truth": s.ground_truth,
+                    "difficulty": s.difficulty, "tags": list(s.tags),
+                })
+            fd, tmp = __import__("tempfile").mkstemp(
+                dir=os.path.dirname(path), suffix=".json.tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:
+            pass  # best-effort persistence
 
     def add(self, scenarios: List[Scenario]):
+        added = False
         for s in scenarios:
             if s.id not in self._by_id:
                 self._scenarios.append(s)
                 self._by_id[s.id] = s
+                added = True
+        if added:
+            self._persist()
 
     def all(self) -> List[Scenario]:
         return list(self._scenarios)

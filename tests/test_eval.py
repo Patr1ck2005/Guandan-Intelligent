@@ -78,7 +78,11 @@ class TestScenarioBank:
         graded = grade_difficulty({"a": 0.9, "b": 0.5, "c": 0.1})
         assert graded == {"a": "easy", "b": "medium", "c": "hard"}
 
-    def test_bank_add_and_filter(self):
+    def test_bank_add_and_filter(self, tmp_path, monkeypatch):
+        # Isolated bank file: a leftover from another session must not make
+        # the synthetic id "x" look pre-existing.
+        monkeypatch.setenv("GUANDAN_SCENARIO_BANK",
+                           str(tmp_path / "bank_filter_test.json"))
         bank = ScenarioBank()
         s = Scenario(id="x", name="X", category="endgame", description="",
                      hand=[1], source="synthetic", ground_truth="exact")

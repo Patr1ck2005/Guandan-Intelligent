@@ -62,19 +62,20 @@ def test_compare_win_share_breach():
 
 
 def test_compare_absent_baseline_not_breach():
-    """A new metric with no baseline entry is skipped, not failed."""
+    """A new metric with no baseline entry is skipped, not failed — but zero
+    comparable metrics must not read as a green pass."""
     base = {"benchmark": {}, "match": {}}
     cur = {"benchmark": {"mc": {"accuracy": 50.0}}, "match": {"a_share": 60.0}}
     r = compare_metrics(cur, base)
-    assert r["verdict"] == "green"
+    assert r["verdict"] == "no-comparable-metrics"
     assert r["metrics_checked"] == 0
-    print("  PASS absent baseline metrics skipped")
+    print("  PASS absent baseline metrics skipped (not a false green)")
 
 
 def test_compare_empty_inputs():
     r = compare_metrics({}, {})
-    assert r["verdict"] == "green"
-    print("  PASS empty inputs")
+    assert r["verdict"] == "no-comparable-metrics"
+    print("  PASS empty inputs (no-comparable-metrics)")
 
 
 if __name__ == "__main__":
