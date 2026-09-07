@@ -93,6 +93,10 @@ def _make_arena_agent(profile: dict):
 
     MC deciders (mc, ismcts) go through registry.create_agent_for_player()
     for real parameter passing. Non-MC deciders use TestableModel wrappers.
+
+    Unknown model ids return (None, label) so callers can report a per-model
+    error — the old else-branch silently ran BlindScorer under the unknown
+    id's name (a typo'd id looked like a successful blind result).
     """
     model_id = profile.get("id", "blind")
     label = profile.get("label", model_id)
@@ -108,7 +112,7 @@ def _make_arena_agent(profile: dict):
     if model_id not in ("mc", "ismcts"):
         # Extract model constructor params (filter out metadata keys)
         model_params = {k: v for k, v in profile.items()
-                       if k not in ("id", "label")}
+                        if k not in ("id", "label")}
         if model_id == "informed":
             from ..ai.models import InformedScorer
             return InformedScorer(**model_params), label
@@ -118,9 +122,11 @@ def _make_arena_agent(profile: dict):
         elif model_id == "exact":
             from ..ai.models import EndgameExactSolver
             return EndgameExactSolver(**model_params), label
-        else:  # blind
+        elif model_id == "blind":
             from ..ai.models import BlindScorer
             return BlindScorer(**model_params), label
+        else:
+            return None, label
 
     # MC deciders — build config from profile and use registry factory
     decider_params = {}

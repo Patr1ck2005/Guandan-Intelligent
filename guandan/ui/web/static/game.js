@@ -3,6 +3,7 @@
    ================================================================ */
 
 let gameState = null;
+let myTurn = false;                  // explicit declaration (was an implicit global)
 let selectedCards = new Set();       // card IDs selected in main hand
 let activeStrip = null;              // index of selected combo strip (or null)
 let debugMode = true;                // default ON
@@ -13,6 +14,7 @@ let showWinRate = true;              // win rate overlay — default ON
 let _playerWinRates = {};            // {player_id: win_rate}
 let _playerTimedOut = {};            // {player_id: bool} timeout flag
 let pollTimer = null;                // polling interval ID
+let pollFailures = 0;                // consecutive poll failures (capped retries)
 
 const SUIT_CHARS = {0: '♣', 1: '♦', 2: '♥', 3: '♠', 4: ''};
 const SUIT_NAMES = {0: 'C', 1: 'D', 2: 'H', 3: 'S', 4: ''};
@@ -22,25 +24,47 @@ const PLAYER_NAMES = ['你', 'AI-右家', 'AI-对家', 'AI-左家'];
 // API
 // ==================================================================
 
-async function fetchState() {
-  gameState = await gameApi.getState();
-  render();
-  if (debugMode) fetchDebug();
-  if (aiDebugOpen || showWinRate) fetchAILog();
+function showGameError(msg) {
+  const el = document.getElementById('message');
+  if (el) { el.textContent = msg; el.className = 'error'; }
 }
 
-function schedulePoll() {
-  pollTimer = setTimeout(async () => {
+async function fetchState() {
+  try {
     gameState = await gameApi.getState();
     render();
     if (debugMode) fetchDebug();
     if (aiDebugOpen || showWinRate) fetchAILog();
-    if (llmThinkingOpen) fetchLLMReasoning();
-    if (gameState.my_turn || gameState.game_over || gameState.round_over) {
-      stopPolling();
-    } else {
-      schedulePoll();  // re-schedule after current request completes
+  } catch (e) {
+    showGameError('状态获取失败: ' + e.message);
+  }
+}
+
+function schedulePoll() {
+  pollTimer = setTimeout(async () => {
+    try {
+      gameState = await gameApi.getState();
+      render();
+      if (debugMode) fetchDebug();
+      if (aiDebugOpen || showWinRate) fetchAILog();
+      if (llmThinkingOpen) fetchLLMReasoning();
+      pollFailures = 0;
+      if (gameState.my_turn || gameState.game_over || gameState.round_over) {
+        stopPolling();
+        return;
+      }
+    } catch (e) {
+      // A transient blip used to kill the poll chain silently, leaving the
+      // UI stuck on "AI思考中..." forever.
+      pollFailures++;
+      if (pollFailures > 5) {
+        showGameError('服务器无响应，已停止自动刷新 — 请检查服务器后刷新页面');
+        stopPolling();
+        return;
+      }
+      showGameError('连接服务器失败，正在重试 (' + pollFailures + '/5)…');
     }
+    schedulePoll();  // re-schedule after current request completes
   }, 400);
 }
 
@@ -68,7 +92,12 @@ async function playCards() {
     return;
   }
 
-  gameState = await gameApi.playCards(cardIds);
+  try {
+    gameState = await gameApi.playCards(cardIds);
+  } catch (e) {
+    showGameError('出牌请求失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   if (cardIds) {
@@ -86,7 +115,12 @@ async function playCards() {
 
 async function passTurn() {
   if (!myTurn) return;
-  gameState = await gameApi.passTurn();
+  try {
+    gameState = await gameApi.passTurn();
+  } catch (e) {
+    showGameError('过牌请求失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   document.getElementById('suggest-panel').style.display = 'none';
@@ -95,7 +129,12 @@ async function passTurn() {
 }
 
 async function newGame() {
-  gameState = await gameApi.newGame();
+  try {
+    gameState = await gameApi.newGame();
+  } catch (e) {
+    showGameError('新游戏失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   comboStrips = [];
@@ -106,7 +145,12 @@ async function newGame() {
 }
 
 async function newRound() {
-  gameState = await gameApi.newRound();
+  try {
+    gameState = await gameApi.newRound();
+  } catch (e) {
+    showGameError('下一局失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   comboStrips = [];
@@ -124,7 +168,13 @@ function clearPlayZones() {
 
 async function showHint() {
   if (!myTurn || !gameState) return;
-  const data = await gameApi.getHint();
+  let data;
+  try {
+    data = await gameApi.getHint();
+  } catch (e) {
+    showGameError('提示获取失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   if (data.card_ids) {
@@ -134,8 +184,10 @@ async function showHint() {
 }
 
 async function fetchDebug() {
-  const data = await gameApi.getDebug();
-  if (data.hands) renderDebugHands(data.hands);
+  try {
+    const data = await gameApi.getDebug();
+    if (data.hands) renderDebugHands(data.hands);
+  } catch (e) { /* debug overlay is best-effort */ }
 }
 
 // ==================================================================
@@ -259,6 +311,14 @@ function render() {
   const isAuto = gameState.auto_play;
   autoBtn.textContent = isAuto ? '停止自动' : '自动对局';
   autoBtn.style.background = isAuto ? '#c0392b' : '#555';
+  // Auto-play only makes sense inside a running round: at round-over it used
+  // to re-run settlement; while a tribute return is pending it bypassed the
+  // exchange. Disable it in those states.
+  const tributePending = gameState.tribute && gameState.tribute.pending_return;
+  autoBtn.disabled = gameState.round_over || gameState.game_over || tributePending;
+  autoBtn.title = autoBtn.disabled
+    ? (tributePending ? '请先完成还贡' : '请先点「下一局」开始新一局')
+    : '';
   document.getElementById('btn-new-round').style.display =
     (gameState.round_over && !gameState.game_over) ? 'inline-block' : 'none';
 
@@ -319,7 +379,12 @@ async function submitTributeReturn() {
     return;
   }
   const ids = Array.from(selectedCards);
-  gameState = await gameApi.tributeReturn(ids);
+  try {
+    gameState = await gameApi.tributeReturn(ids);
+  } catch (e) {
+    showGameError('还贡请求失败: ' + e.message);
+    return;
+  }
   selectedCards.clear();
   activeStrip = null;
   render();
@@ -601,12 +666,16 @@ function toggleAIDebug() {
 }
 
 async function fetchAILog() {
-  const data = await gameApi.getAILog();
-  renderAILog(data);
+  try {
+    const data = await gameApi.getAILog();
+    renderAILog(data);
+  } catch (e) { /* AI log panel is best-effort */ }
 }
 
 async function clearAILog() {
-  await gameApi.clearAILog();
+  try {
+    await gameApi.clearAILog();
+  } catch (e) { /* ignore */ }
   document.getElementById('ai-debug-content').innerHTML =
     '<div style="color:#888;padding:10px">日志已清空</div>';
 }
@@ -832,7 +901,12 @@ function toggleWinRate() {
 // ==================================================================
 
 async function startGame() {
-  gameState = await gameApi.startGame();
+  try {
+    gameState = await gameApi.startGame();
+  } catch (e) {
+    showGameError('开始游戏失败: ' + e.message);
+    return;
+  }
   render();
   if (debugMode) fetchDebug();
 }
@@ -843,10 +917,20 @@ async function startGame() {
 
 async function toggleAutoPlay() {
   const btn = document.getElementById('btn-auto-play');
-  const isAuto = btn.textContent.includes('停止');
-  const d = await gameApi.toggleAutoPlay(!isAuto);
+  const isAuto = gameState ? gameState.auto_play : btn.textContent.includes('停止');
+  let d;
+  try {
+    d = await gameApi.toggleAutoPlay(!isAuto);
+  } catch (e) {
+    showGameError('自动对局切换失败: ' + e.message);
+    return;
+  }
   btn.textContent = d.auto_play ? '停止自动' : '自动对局';
   btn.style.background = d.auto_play ? '#c0392b' : '#555';
+  if (d.error) {
+    showGameError(d.message || '自动对局未开启');
+    return;
+  }
   if (d.auto_play) {
     selectedCards.clear();
     activeStrip = null;
@@ -865,7 +949,13 @@ async function aiSuggest() {
   panel.style.display = 'block';
   content.innerHTML = '<span style="color:#aaa">AI 正在分析...</span>';
 
-  const d = await gameApi.getSuggest();
+  let d;
+  try {
+    d = await gameApi.getSuggest();
+  } catch (e) {
+    content.innerHTML = '<span style="color:#e74c3c">分析失败: ' + e.message + '</span>';
+    return;
+  }
   const hasOnlyPass = (!d.candidates || d.candidates.length === 0) ||
     (d.candidates.length === 1 && d.candidates[0].type === 'PASS');
   if (hasOnlyPass) {
@@ -992,10 +1082,6 @@ async function playSuggested(displayStrs) {
   }
 }
 
-function updatePlayButton() {
-  document.getElementById('btn-play').disabled = !myTurn || selectedCards.size === 0;
-}
-
 // ==================================================================
 // AI Evaluate (analyze currently selected cards)
 // ==================================================================
@@ -1008,7 +1094,13 @@ async function aiEvaluate() {
   const cardIds = selectedCards ? Array.from(selectedCards) : [];
   content.innerHTML = '<span style="color:#aaa">AI 分析中...</span>';
 
-  const d = await gameApi.evaluate(cardIds);
+  let d;
+  try {
+    d = await gameApi.evaluate(cardIds);
+  } catch (e) {
+    content.innerHTML = '<span style="color:#e74c3c">评估失败: ' + e.message + '</span>';
+    return;
+  }
 
   if (d.info) {
     content.innerHTML = `<span style="color:#daa520">${d.info}</span>`;
@@ -1073,7 +1165,14 @@ async function toggleConfig() {
 }
 
 async function fetchConfig() {
-  const d = await gameApi.getConfig();
+  let d;
+  try {
+    d = await gameApi.getConfig();
+  } catch (e) {
+    document.getElementById('config-panel').innerHTML =
+      '<div style="padding:16px;color:#e74c3c">配置加载失败: ' + e.message + '</div>';
+    return;
+  }
   schema = d.schema || {};
   currentConfig = d.config || {};
   buildConfigTab('global', null);
@@ -1211,8 +1310,15 @@ async function applyConfig() {
     if (!cb || !cb.checked) currentConfig.players[p] = {decider: null, params: {}};
   }
 
-  await gameApi.saveConfig(currentConfig);
-  const msg = document.getElementById('message'); msg.textContent = 'AI设置已保存'; msg.style.color = '#27ae60';
+  try {
+    await gameApi.saveConfig(currentConfig);
+  } catch (e) {
+    const msg = document.getElementById('message');
+    msg.textContent = 'AI设置保存失败: ' + e.message;
+    msg.className = 'error';
+    return;
+  }
+  const msg = document.getElementById('message'); msg.textContent = 'AI设置已保存'; msg.className = ''; msg.style.color = '#27ae60';
   setTimeout(() => { msg.textContent = ''; msg.style.color = ''; }, 1500);
   await fetchConfig();
   // Immediately refresh game state so decider badges update

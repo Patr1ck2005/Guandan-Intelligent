@@ -320,7 +320,14 @@ function updatePanelParam(key, val) {
   if (!_panelCtx) return;
   const prof = (_panelCtx.tab==='P'?P:T).profs[_panelCtx.idx];
   if (!prof) return;
-  prof[key] = val;
+  // Handle dotted keys like "inner.round_weight"
+  const parts = key.split('.');
+  let target = prof;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (target[parts[i]] === undefined) target[parts[i]] = {};
+    target = target[parts[i]];
+  }
+  target[parts[parts.length - 1]] = val;
 }
 
 function stepPanelParam(key, delta) {
@@ -348,19 +355,6 @@ function stepPanelParam(key, delta) {
   const inpId = 'pp-' + key.replace('.','-');
   const inp = document.getElementById(inpId);
   if (inp) inp.value = target[lastKey];
-}
-
-function updatePanelParam(key, val) {
-  if (!_panelCtx) return;
-  const prof = (_panelCtx.tab==='P'?P:T).profs[_panelCtx.idx];
-  if (!prof) return;
-  const parts = key.split('.');
-  let target = prof;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (target[parts[i]] === undefined) target[parts[i]] = {};
-    target = target[parts[i]];
-  }
-  target[parts[parts.length - 1]] = val;
 }
 
 function applyPanelParams() {
@@ -408,8 +402,9 @@ function resetPanelParams() {
 // Init
 // ==================================================================
 async function init() {
-  const [mr, sr] = await Promise.all([fetch('/api/arena/models'), fetch('/api/arena/scenarios')]);
-  const md = await mr.json(), sd = await sr.json();
+  try {
+    const [mr, sr] = await Promise.all([fetch('/api/arena/models'), fetch('/api/arena/scenarios')]);
+    const md = await mr.json(), sd = await sr.json();
   schema = {decider:{},inner_model:{},enumerator:{}};
   (md.outer||[]).forEach(m => { schema.decider[m.id]=m; allM[m.id]=m; });
   (md.inner||[]).forEach(m => { schema.inner_model[m.id]=m; allM[m.id]=m; });
@@ -437,6 +432,12 @@ async function init() {
   if (firstT) selT(firstT.id);
 
   document.getElementById('persp-tabs').innerHTML = [0,1,2,3].map(i=>`<button class="ptab${i===0?' on':''}" onclick="swPersp(${i})">${PN[i]}</button>`).join('');
+  } catch (e) {
+    // A dead server used to leave the whole page silently uninitialized.
+    const el = document.getElementById('arena-app') || document.body;
+    el.insertAdjacentHTML('afterbegin',
+      `<div style="background:#5c1a1a;color:#fff;padding:8px 14px;border-radius:6px;margin:8px">测试场初始化失败: ${e.message} — 请确认服务器正在运行后刷新页面</div>`);
+  }
 }
 
 function switchTab(tab) {
@@ -457,8 +458,16 @@ function renderScList(cid, cat, sid, fn) {
 
 // ==================================================================
 // Game-table renderer (reuses game.html zone layout)
+//
+// Two modes:
+//   - sim (tab 确定推演): st is a simulator state; the center panel offers
+//     manual play/pass + 分析 + 编辑.
+//   - scenario (tab 真实牌桌): st is synthesized from the scenario detail;
+//     the center panel offers 分析 only (manual steps never made sense here
+//     and used to act on the OTHER tab's simulator).
 // ==================================================================
-function buildTable(containerId, st) {
+function buildTable(containerId, st, opts) {
+  const o = opts || {mode: 'sim'};
   const el = document.getElementById(containerId);
   if (!el || !st) return;
   const pls = st.players||[];
@@ -483,9 +492,9 @@ function buildTable(containerId, st) {
     if (cards.length) {
       html += `<div class="ahc" id="ahc-${containerId}-${p}">${scs(cards).map(c => {
         const sel = P.selected.has(c.id) ? ' selected' : '';
-        const playable = cp===p ? ' clickable' : '';
-        const click = cp===p ? ` data-cid="${c.id}" onclick="toggleArenaCard(${c.id})"` : '';
-        return ac(c, sel+playable, click);
+        const clickable = (o.mode === 'sim' && cp===p) ? ' clickable' : '';
+        const click = (o.mode === 'sim' && cp===p) ? ` data-cid="${c.id}" onclick="toggleArenaCard(${c.id})"` : '';
+        return ac(c, sel+clickable, click);
       }).join('')}</div>`;
     }
     html += `</div>`;
@@ -498,21 +507,31 @@ function buildTable(containerId, st) {
   html += `<div class="cz-play-area partner" id="${paPrefix}a-2"><span class="cz-pcards" id="${paPrefix}pcard-2"></span></div>`;
   html += `<div class="cz-play-area left" id="${paPrefix}a-3"><span class="cz-pcards" id="${paPrefix}pcard-3"></span></div>`;
 
-  // Center: unified vertical layout
-  let centerHTML = `<div class="tbl-ctr"><div style="background:rgba(0,0,0,0.3);border-radius:8px;padding:6px 8px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:0.78em">
-    <div class="tinfo">级牌 <strong>Lv${st.level||2}</strong> · 回合${st.trick_number||1}</div>
+  // Center: mode-aware
+  const infoBlock = `<div class="tinfo">级牌 <strong>Lv${st.level||2}</strong> · 回合${st.trick_number||1}</div>
     <div style="font-size:0.75em;color:#888">轮到: <b style="color:#daa520">${names[cp]}</b></div>
-    ${st.can_pass ? '<div style="font-size:0.65em;color:#888">可过牌</div>' : ''}
-    <div style="display:flex;gap:6px;justify-content:center">
+    ${st.can_pass ? '<div style="font-size:0.65em;color:#888">可过牌</div>' : ''}`;
+  let centerActions;
+  if (o.mode === 'scenario') {
+    centerActions = `
+    <div style="display:flex;gap:6px;justify-content:center;margin-top:4px">
+      <button class="btn btn-g btn-sm" onclick="runT()">分析</button>
+    </div>`;
+  } else {
+    centerActions = `
+    <div style="display:flex;gap:6px;justify-content:center;margin-top:4px">
       <button class="btn btn-gn btn-sm" onclick="manualPlay()">出牌</button>
       ${st.can_pass ? '<button class="btn btn-gy btn-sm" onclick="manualPass()">过牌</button>' : ''}
     </div>
-    <div style="display:flex;gap:6px;justify-content:center">
+    <div style="display:flex;gap:6px;justify-content:center;margin-top:4px">
       <button class="btn btn-g btn-sm" onclick="runP()">分析</button>
       <button class="btn btn-gy btn-sm" onclick="customLoadFromSim(P.simState)">编辑</button>
-    </div>
+    </div>`;
+  }
+  html += `<div class="tbl-ctr"><div style="background:rgba(0,0,0,0.3);border-radius:8px;padding:6px 8px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:0.78em">
+    ${infoBlock}
+    ${centerActions}
   </div></div>`;
-  html += centerHTML;
   el.innerHTML = html;
 
   // Update play areas (状态区)
@@ -598,17 +617,31 @@ function renderProfsP() {
 async function loadScP() { P.cat=document.getElementById('pcat').value; renderScList('sc-list',P.cat,P.sid,'selP'); }
 async function selP(id) {
   P.sid=id; P.res=[]; P.selected.clear(); loadScP();
-  document.getElementById('pres').innerHTML='<span class="emp">初始化模拟...</span>'; document.getElementById('prcnt').textContent='';
-  // Init simulator
-  const r = await fetch('/api/arena/sim/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario_id:id})});
-  P.simState = await r.json();
-  P.simId = P.simState.sim_id;
-  P.res=[];
-  document.getElementById('pres').innerHTML='<span class="emp">点击分析</span>';
-  buildTable('tbl-p', P.simState);
-  // Scenario info
-  const s = await (await fetch('/api/arena/scenarios/'+id)).json();
-  document.getElementById('dbg-sc-p').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
+  // Kill any in-flight analysis and invalidate stale responses: results
+  // from the previous scenario used to render under the new one.
+  if (P.running) stopP();
+  P.reqSeq = (P.reqSeq||0) + 1;
+  const seq = P.reqSeq;
+  const pres = document.getElementById('pres');
+  pres.innerHTML='<span class="emp">初始化模拟...</span>'; document.getElementById('prcnt').textContent='';
+  try {
+    const r = await fetch('/api/arena/sim/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario_id:id})});
+    const j = await r.json();
+    if (!r.ok || j.error) throw new Error(j.error || ('HTTP ' + r.status));
+    if (seq !== P.reqSeq) return;   // superseded by a newer selection
+    P.simState = j;
+    P.simId = j.sim_id;
+    P.res=[];
+    pres.innerHTML='<span class="emp">点击分析</span>';
+    buildTable('tbl-p', P.simState);
+    // Scenario info
+    const s = await (await fetch('/api/arena/scenarios/'+id)).json();
+    document.getElementById('dbg-sc-p').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
+  } catch (e) {
+    if (seq !== P.reqSeq) return;
+    P.simState = null; P.simId = null;
+    pres.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">初始化失败: ${e.message}</span>`;
+  }
 }
 
 // ==================================================================
@@ -616,28 +649,34 @@ async function selP(id) {
 // ==================================================================
 async function stepP(cardIds, pass) {
   if (!P.simId) return;
-  // Abort running analysis, suppress stale renders
+  if (P.stepping) return;   // in-flight guard: double-click used to apply two steps
   const hadRunning = !!(P.running && P.abort);
   if (hadRunning) stopP();
+  P.stepping = true;
   P._suppressRender = true;
   P.res = [];
   const presEl = document.getElementById('pres');
-  presEl.innerHTML = hadRunning ? '<div style="color:#e67e22;font-size:0.78em;padding:4px;margin-bottom:4px;background:rgba(230,126,34,0.08);border-radius:4px">已终止未完成的求解器</div>' : '<span class="emp">已执行，点击分析继续</span>';
+  presEl.innerHTML = hadRunning ? '<div style="color:#e67e22;font-size:0.78em;padding:4px;margin-bottom:4px;background:rgba(230,126,34,0.08);border-radius:4px">已放弃等待中的分析</div>' : '<span class="emp">已执行，点击分析继续</span>';
   document.getElementById('prcnt').textContent = '';
 
-  const body = {sim_id:P.simId, pass:!!pass};
-  if (!pass) body.card_ids = cardIds;
-  const r = await fetch('/api/arena/sim/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const newState = await r.json();
-  if (newState.error) {
-    presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
+  try {
+    const body = {sim_id:P.simId, pass:!!pass};
+    if (!pass) body.card_ids = cardIds;
+    const r = await fetch('/api/arena/sim/step',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const newState = await r.json();
+    if (newState.error) {
+      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
+      return;
+    }
+    P.simState = newState;
+    P.selected.clear();
+    buildTable('tbl-p', P.simState);
+  } catch (e) {
+    presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">请求失败: ${e.message}</span>` + presEl.innerHTML;
+  } finally {
+    P.stepping = false;
     P._suppressRender = false;
-    return;
   }
-  P.simState = newState;
-  P.selected.clear();
-  buildTable('tbl-p', P.simState);
-  P._suppressRender = false;
 }
 
 // ==================================================================
@@ -647,20 +686,29 @@ async function runP() {
   if (!P.simId) return;
   if (P.running) { stopP(); return; }
   P.running=true; P.res=[]; P.abort=new AbortController();
+  P.runSeq = (P.runSeq||0) + 1;
+  const seq = P.runSeq;
   document.getElementById('pres').innerHTML=''; const btn=document.getElementById('btn-ap');
   btn.textContent='停止'; btn.className='btn btn-red btn-sm';
   // Pass all profile params through to API
   const models = P.profs.map(p=>{const m={id:p.id,label:p.label};for(const k of Object.keys(p)){if(k!=='id'&&k!=='label')m[k]=p[k];}return m;});
   document.getElementById('prcnt').textContent=`(0/${models.length})`;
-  const proms = models.map(async m=>{
+  for (const m of models) {   // serial: analyze clears a global log buffer per request, parallel calls clobbered each other's debug logs
     try {
       const r = await fetch('/api/arena/sim/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sim_id:P.simId,models:[m]}),signal:P.abort.signal});
+      if (seq !== P.runSeq) return;    // scene changed mid-run
       if (!r.ok) P.res.push({model_id:m.id,model_name:m.label||m.id,error:'HTTP '+r.status});
       else { const d=await r.json(); if(d.results)P.res.push(...d.results); }
-    } catch(e) { if(e.name!=='AbortError') P.res.push({model_id:m.id,model_name:m.label||m.id,error:e.message}); }
+    } catch(e) {
+      if (e.name==='AbortError') break;
+      if (seq !== P.runSeq) return;
+      P.res.push({model_id:m.id,model_name:m.label||m.id,error:e.message});
+    }
+    if (seq !== P.runSeq) return;
     renderResP(); document.getElementById('prcnt').textContent=`(${P.res.length}/${models.length})`;
-  });
-  await Promise.all(proms); finishP();
+  }
+  if (seq !== P.runSeq) return;
+  finishP();
 }
 function stopP() { if(P.abort){P.abort.abort();P.abort=null;} finishP(); }
 function finishP() { P.running=false; const btn=document.getElementById('btn-ap'); btn.textContent='分析'; btn.className='btn btn-gn btn-sm'; }
@@ -764,17 +812,54 @@ function collectProfsT() {
 function loadScT() { T.cat=document.getElementById('tcat').value; renderScList('sc-list2',T.cat,T.sid,'selT'); }
 async function selT(id) {
   T.sid=id; loadScT();
-  const [r1,r2] = await Promise.all([fetch('/api/arena/scenarios/'+id),fetch('/api/arena/scenarios/'+id+'/perspectives')]);
-  T.detail=await r1.json(); T.persps=(await r2.json()).perspectives||{};
-  T.res=[]; document.getElementById('tres').innerHTML='<span class="emp">点击分析</span>'; document.getElementById('trcnt').textContent='';
-  renderTableT(); updPerspInfo();
-  const s=T.detail;
-  document.getElementById('dbg-sc').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
-  document.getElementById('dbg-ai').innerHTML=''; document.getElementById('dbg-uk').innerHTML='';
+  // Invalidate stale responses + abort in-flight analysis on scene change.
+  if (T.running) stopT();
+  T.reqSeq = (T.reqSeq||0) + 1;
+  const seq = T.reqSeq;
+  try {
+    const [r1,r2] = await Promise.all([fetch('/api/arena/scenarios/'+id),fetch('/api/arena/scenarios/'+id+'/perspectives')]);
+    const d1 = await r1.json(); const d2 = await r2.json();
+    if (!r1.ok || d1.error) throw new Error(d1.error || ('HTTP ' + r1.status));
+    if (seq !== T.reqSeq) return;
+    T.detail=d1; T.persps=d2.perspectives||{};
+    T.res=[]; document.getElementById('tres').innerHTML='<span class="emp">点击分析</span>'; document.getElementById('trcnt').textContent='';
+    renderTableT(); updPerspInfo();
+    const s=T.detail;
+    document.getElementById('dbg-sc').innerHTML=`<div><b>${s.name}</b> <span style="color:#888">${s.category}</span></div><div style="color:#aaa;white-space:pre-wrap">${s.description||''}</div>`+(s.reasoning?`<div style="color:#daa520;margin-top:2px">预期: ${s.reasoning}</div>`:'');
+    document.getElementById('dbg-ai').innerHTML=''; document.getElementById('dbg-uk').innerHTML='';
+  } catch (e) {
+    if (seq !== T.reqSeq) return;
+    T.detail = null;
+    document.getElementById('tres').innerHTML = `<span style="color:#e74c3c;font-size:0.82em">场景加载失败: ${e.message}</span>`;
+  }
+}
+
+function scenarioTableState(detail) {
+  // Synthesize a buildTable-shaped state from a scenario detail (the
+  // analyzer's perspective is always seat 0; the table combo, if any, is
+  // shown as the latest trick action of table_player).
+  const players = [
+    {hand: detail.hand || [], hand_size: (detail.hand || []).length, finished: false},
+    {hand: (detail.opponents||{})['1'] || [], hand_size: ((detail.opponents||{})['1'] || []).length, finished: false},
+    {hand: (detail.opponents||{})['2'] || [], hand_size: ((detail.opponents||{})['2'] || []).length, finished: false},
+    {hand: (detail.opponents||{})['3'] || [], hand_size: ((detail.opponents||{})['3'] || []).length, finished: false},
+  ];
+  const trick_history = [];
+  const tp = detail.table_player;
+  if (detail.table && detail.table.length && tp != null && tp >= 0) {
+    trick_history.push({player: tp, pass: false,
+      combo: {type: 'TABLE', type_cn: '桌面', cards: detail.table,
+              card_ids: detail.table.map(c => c.id), length: detail.table.length}});
+  }
+  return {
+    players, current_player: 0, trick_history,
+    can_pass: false, level: detail.level || 2, trick_number: 1,
+  };
 }
 
 function renderTableT() {
-  buildTable('tbl-t', T.detail, T.persps, T.debug, T.persp);
+  if (!T.detail) return;
+  buildTable('tbl-t', scenarioTableState(T.detail), {mode: 'scenario'});
   // Unknown cards
   if (T.debug||T.persp>0) {
     const s=T.detail; if(!s) return;
@@ -797,19 +882,28 @@ async function runT() {
   if (!T.sid) return;
   if (T.running) { stopT(); return; }
   T.running=true; T.res=[]; T.abort=new AbortController();
+  T.runSeq = (T.runSeq||0) + 1;
+  const seq = T.runSeq;
   document.getElementById('tres').innerHTML=''; const btn=document.getElementById('btn-at');
   btn.textContent='停止'; btn.className='btn btn-red btn-sm';
   const models = collectProfsT();
   document.getElementById('trcnt').textContent=`(0/${models.length})`;
-  const proms = models.map(async m=>{
+  for (const m of models) {   // serial: per-request game_logger.clear() clobbered parallel debug logs
     try {
       const r = await fetch('/api/arena/analyze/scenario',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scenario_id:T.sid,models:[m],perspective:T.persp,debug:T.debug}),signal:T.abort.signal});
+      if (seq !== T.runSeq) return;
       if (!r.ok) T.res.push({model_id:m.id,model_name:m.label||m.id,error:'HTTP '+r.status});
       else { const d=await r.json(); if(d.results)T.res.push(...d.results); if(T.debug) renderDbgT(d.results); }
-    } catch(e) { if(e.name!=='AbortError') T.res.push({model_id:m.id,model_name:m.label||m.id,error:e.message}); }
+    } catch(e) {
+      if (e.name==='AbortError') break;
+      if (seq !== T.runSeq) return;
+      T.res.push({model_id:m.id,model_name:m.label||m.id,error:e.message});
+    }
+    if (seq !== T.runSeq) return;
     renderResT(); document.getElementById('trcnt').textContent=`(${T.res.length}/${models.length})`;
-  });
-  await Promise.all(proms); finishT();
+  }
+  if (seq !== T.runSeq) return;
+  finishT();
 }
 function stopT() { if(T.abort){T.abort.abort();T.abort=null;} finishT(); }
 function finishT() { T.running=false; const btn=document.getElementById('btn-at'); btn.textContent='分析'; btn.className='btn btn-gn btn-sm'; }
@@ -853,13 +947,22 @@ function renderDbgT(results) {
 async function benchT() {
   const cat=document.getElementById('tcat').value||''; const models=collectProfsT();
   document.getElementById('bsect').style.display='block'; document.getElementById('bsum').innerHTML='<span style="color:#888;font-size:0.76em">运行中...</span>';
-  document.getElementById('btn-bt').textContent='...'; document.getElementById('btn-bt').disabled=true;
-  const r=await fetch('/api/arena/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:cat,models})});
-  const d=await r.json(); const sum=d.summary||[];
-  document.getElementById('bsum').innerHTML=sum.length?`<h4 style="font-size:0.76em;color:#daa520;margin:3px 0">排行榜</h4><table style="width:100%;font-size:0.74em;border-collapse:collapse"><tr style="color:#888"><th>模型</th><th>准确率</th><th>正确/总数</th><th>平均</th></tr>${sum.map(s=>`<tr style="border-bottom:1px solid rgba(255,255,255,0.02)"><td>${s.model_name}</td><td style="color:${s.accuracy>=80?'#27ae60':'#e67e22'}">${s.accuracy}%</td><td style="color:#aaa">${s.correct}/${s.total}</td><td style="color:#888">${s.avg_ms}ms</td></tr>`).join('')}</table>`:'<span style="color:#888">无结果</span>';
-  const det=d.results||[];
-  document.getElementById('bdet').innerHTML=det.length?`<h4 style="font-size:0.76em;color:#daa520;margin:3px 0">详情</h4><table style="width:100%;font-size:0.68em;border-collapse:collapse"><tr style="color:#888"><th>场景</th><th>模型</th><th>选择</th></tr>${det.map(r=>`<tr style="border-bottom:1px solid rgba(255,255,255,0.02)"><td style="color:#aaa">${r.scenario_name||''}</td><td>${r.model_name||''}</td><td style="color:${r.correct?'#27ae60':'#e74c3c'}">${r.choice_type||'?'} ${(r.chosen_cards||[]).join(' ')}${r.pass_chosen?'过':''} ${r.correct?'✓':'✗'}</td></tr>`).join('')}</table>`:'';
-  document.getElementById('btn-bt').textContent='基准'; document.getElementById('btn-bt').disabled=false;
+  const btn=document.getElementById('btn-bt');
+  btn.textContent='...'; btn.disabled=true;
+  try {
+    const r=await fetch('/api/arena/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:cat,models})});
+    const d=await r.json().catch(()=>({}));
+    if (!r.ok || d.error) throw new Error(d.error || ('HTTP ' + r.status));
+    const sum=d.summary||[];
+    document.getElementById('bsum').innerHTML=sum.length?`<h4 style="font-size:0.76em;color:#daa520;margin:3px 0">排行榜</h4><table style="width:100%;font-size:0.74em;border-collapse:collapse"><tr style="color:#888"><th>模型</th><th>准确率</th><th>正确/总数</th><th>平均</th></tr>${sum.map(s=>`<tr style="border-bottom:1px solid rgba(255,255,255,0.02)"><td>${s.model_name}</td><td style="color:${s.accuracy>=80?'#27ae60':'#e67e22'}">${s.accuracy}%</td><td style="color:#aaa">${s.correct}/${s.total}</td><td style="color:#888">${s.avg_ms}ms</td></tr>`).join('')}</table>`:'<span style="color:#888">无结果</span>';
+    const det=d.results||[];
+    document.getElementById('bdet').innerHTML=det.length?`<h4 style="font-size:0.76em;color:#daa520;margin:3px 0">详情</h4><table style="width:100%;font-size:0.68em;border-collapse:collapse"><tr style="color:#888"><th>场景</th><th>模型</th><th>选择</th></tr>${det.map(r=>`<tr style="border-bottom:1px solid rgba(255,255,255,0.02)"><td style="color:#aaa">${r.scenario_name||''}</td><td>${r.model_name||''}</td><td style="color:${r.correct?'#27ae60':'#e74c3c'}">${r.choice_type||'?'} ${(r.chosen_cards||[]).join(' ')}${r.pass_chosen?'过':''} ${r.correct?'✓':'✗'}</td></tr>`).join('')}</table>`:'';
+  } catch (e) {
+    document.getElementById('bsum').innerHTML=`<span style="color:#e74c3c;font-size:0.76em">基准失败: ${e.message}</span>`;
+  } finally {
+    // try/finally: a single 500 used to leave the button disabled forever
+    btn.textContent='基准'; btn.disabled=false;
+  }
 }
 // ==================================================================
 // Custom scenario state
@@ -901,6 +1004,7 @@ function pushUndoState() {
   if (C._history.length > C._maxHistory) C._history.shift();
 }
 function undoAction() {
+  if (C.sim_mode) return;   // sim mode has its own state — undo used to rewrite builder hands underneath a live sim view
   if (C._history.length === 0) return;
   const s = C._history.pop();
   C.hands = s.hands;
@@ -911,8 +1015,10 @@ function undoAction() {
   renderCustomAll();
 }
 function setLevel(val) {
+  const clamped = Math.max(2, Math.min(14, val));
+  if (clamped === C.level) return;   // no-op at the boundary: no empty undo entry
   pushUndoState();
-  C.level = val;
+  C.level = clamped;
   renderCustomAll();
 }
 
@@ -1062,6 +1168,12 @@ function renderCardPool() {
 // ==================================================================
 function poolClick(cid, event) {
   if (C.allAssignedCards().has(cid)) return;
+  if (C.focus_play === null && C.focus_player < 0) {
+    // No target selected — the old code pushed an undo snapshot and did
+    // nothing visible, so Ctrl+Z felt broken.
+    alert('请先点击一个玩家区或出牌区，再从牌池选牌');
+    return;
+  }
   pushUndoState();
 
   if (C.focus_play !== null) {
@@ -1511,6 +1623,9 @@ function customLoadFromSim(simState) {
   // Restore builder center panel
   const ctr = document.querySelector('#custom-builder .tbl-ctr > div');
   if (ctr && C._builder_panel) ctr.innerHTML = C._builder_panel;
+  // Restore the start button label (finishC used to leave it as 分析)
+  const btnAc = document.getElementById('btn-ac');
+  if (btnAc) { btnAc.textContent = '开始推演'; btnAc.className = 'btn btn-gn'; btnAc.disabled = false; }
 
   switchTab('custom');
   renderCustomAll();
@@ -1605,7 +1720,24 @@ function renderSimState(state) {
 // Start simulation
 // ==================================================================
 async function customStart() {
-  // Validate: no duplicate cards across hands and trick action cards
+  if (C.sim_mode) return;
+  if (C.starting) return;   // in-flight guard: double-click created orphan simulators
+  // Hard validation BEFORE submit: an illegal table combo used to be
+  // silently dropped by the backend (its cards vanished from the game).
+  const v = czValidate();
+  if (!v.valid) { alert('无法开始推演: ' + v.reason); return; }
+  for (let p = 0; p <= 3; p++) {
+    const zp = C.zone_play[p];
+    if (zp.action !== 'play' || !zp.cards || zp.cards.length === 0) continue;
+    const ok = await new Promise(res => {
+      fetch('/api/arena/check_combo', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({card_ids: [...zp.cards], level: C.level}),
+      }).then(r => r.json()).then(d => res(!!d.valid)).catch(() => res(false));
+    });
+    if (!ok) { alert(`玩家 ${p + 1} 的出牌区不是合法牌型，请修正后再开始`); return; }
+  }
+  // Duplicate-card check (hands + trick action cards)
   const assigned = new Set();
   for (let p = 0; p <= 3; p++) {
     for (const cid of C.hands[p]) {
@@ -1623,6 +1755,9 @@ async function customStart() {
       assigned.add(cid);
     }
   }
+  // Show what will happen to the unassigned pool cards
+  const unassigned = 108 - assigned.size;
+  if (!confirm(`开始推演？\n手牌: ${C.hands.map(h => h.length).join('/')} 张\n未分配的 ${unassigned} 张牌将被视为「已打出」。\n级牌 Lv${C.level}`)) return;
 
   const body = {
     hands: {'0': C.hands[0], '1': C.hands[1], '2': C.hands[2], '3': C.hands[3]},
@@ -1632,17 +1767,17 @@ async function customStart() {
     level: C.level,
   };
 
-  // Build trick_actions from zone_play for completeness (not sent to API but used for validation)
-  const trickActions = C.buildTrickActions();
-
+  C.starting = true;
+  const startBtn = document.getElementById('btn-ac');
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '初始化…'; }
   try {
     const r = await fetch('/api/arena/sim/init_custom', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    const state = await r.json();
-    if (state.error) { C.sim_mode = false; alert('初始化失败: ' + state.error); return; }
+    const state = await r.json().catch(() => ({}));
+    if (!r.ok || state.error) { C.sim_mode = false; alert('初始化失败: ' + (state.error || ('HTTP ' + r.status))); return; }
     C.simState = state;
     C.simId = state.sim_id;
     C.res = [];
@@ -1656,6 +1791,9 @@ async function customStart() {
   } catch (e) {
     C.sim_mode = false;
     alert('请求失败: ' + e.message);
+  } finally {
+    C.starting = false;
+    if (startBtn && !C.sim_mode) { startBtn.disabled = false; startBtn.textContent = '开始推演'; }
   }
 }
 
@@ -1681,27 +1819,34 @@ function manualPassC() {
 
 async function stepC(cardIds, pass) {
   if (!C.simId) return;
+  if (C.stepping) return;   // in-flight guard
   const hadRunning = !!(C.running && C.abort);
   if (hadRunning) stopC();
+  C.stepping = true;
   C._suppressRender = true;
   C.res = [];
   const presEl = document.getElementById('cres');
-  presEl.innerHTML = hadRunning ? '<div style="color:#e67e22;font-size:0.78em;padding:4px;margin-bottom:4px;background:rgba(230,126,34,0.08);border-radius:4px">已终止未完成的求解器</div>' : '<span class="emp">已执行，点击分析继续</span>';
+  presEl.innerHTML = hadRunning ? '<div style="color:#e67e22;font-size:0.78em;padding:4px;margin-bottom:4px;background:rgba(230,126,34,0.08);border-radius:4px">已放弃等待中的分析</div>' : '<span class="emp">已执行，点击分析继续</span>';
   document.getElementById('crcnt').textContent = '';
 
-  const body = {sim_id: C.simId, pass: !!pass};
-  if (!pass) body.card_ids = cardIds;
-  const r = await fetch('/api/arena/sim/step', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  const newState = await r.json();
-  if (newState.error) {
-    presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
+  try {
+    const body = {sim_id: C.simId, pass: !!pass};
+    if (!pass) body.card_ids = cardIds;
+    const r = await fetch('/api/arena/sim/step', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const newState = await r.json();
+    if (newState.error) {
+      presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">${newState.error}</span>` + presEl.innerHTML;
+      return;
+    }
+    C.simState = newState;
+    C.selected.clear();
+    renderSimState(C.simState);
+  } catch (e) {
+    presEl.innerHTML = `<span style="color:#e74c3c;font-size:0.82em">请求失败: ${e.message}</span>` + presEl.innerHTML;
+  } finally {
+    C.stepping = false;
     C._suppressRender = false;
-    return;
   }
-  C.simState = newState;
-  C.selected.clear();
-  renderSimState(C.simState);
-  C._suppressRender = false;
 }
 
 async function runC() {

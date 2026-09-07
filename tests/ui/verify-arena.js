@@ -7,7 +7,7 @@
 
 const { chromium } = require('playwright');
 
-const BASE = 'http://localhost:8765';
+const BASE = process.env.GUANDAN_BASE || 'http://localhost:8766';
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
 

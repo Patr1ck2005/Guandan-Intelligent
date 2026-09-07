@@ -152,7 +152,12 @@ Tests use `Card.from_id(n)` to construct hands. Mock external services (HTTP) in
 
 ## Important Notes
 
-- `config.json` is committed — API keys belong in env vars only (`DEEPSEEK_API_KEY`).
+- `config.json` is **gitignored** (`.gitignore` has `*.json`) — it lives only
+  on the local machine. API keys belong in env vars only (`DEEPSEEK_API_KEY`).
+  Two endpoints write it (game-page `/api/config` POST and `/api/eval/tuner/apply`);
+  both share `_CONFIG_WRITE_LOCK` and write atomically. Because it is not in
+  git, a bad write cannot be reverted via git — the tuner-apply endpoint
+  validates weight keys against the search space for this reason.
 - The frontend uses **no framework** — all DOM manipulation is vanilla JS. Templates are Jinja2.
 - `@dataclass(frozen=True, slots=True)` is the standard pattern for value objects.
 - AI is timeboxed: 30s default per turn in game loop, configurable per agent.

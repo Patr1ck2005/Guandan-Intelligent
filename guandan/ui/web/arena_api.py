@@ -67,7 +67,6 @@ class Simulator:
             combo = parser.parse([Card.from_id(i) for i in scenario.table])
             if combo:
                 table.record_play(scenario.table_player, combo)
-
         # Build played_cards — add all unused cards
         assigned = set(scenario.hand)
         for ids in scenario.opponents.values():
@@ -90,8 +89,17 @@ class Simulator:
         )
 
     def apply_play(self, player_id: int, card_ids: list) -> str:
-        """Validate and apply a play. Returns error string or empty on success."""
+        """Validate and apply a play. Returns error string or empty on success.
+
+        Cards in the request that are not in the player's hand used to be
+        silently dropped (playing [5, 999] acted as [5]) — reject instead.
+        """
         hand = self.state.hands[player_id]
+        hand_ids = {c.id for c in hand}
+        requested = set(card_ids)
+        if not requested.issubset(hand_ids):
+            missing = requested - hand_ids
+            return f"牌不在该玩家手中: {sorted(missing)[:5]}"
         cards = [c for c in hand if c.id in card_ids]
 
         result = self.rules.validate_play(
@@ -146,14 +154,17 @@ class Simulator:
             tuple(Card.from_id(i) for i in hands.get(p, [])) for p in range(4)
         )
 
-        # Build table
+        # Build table — an unparseable table combo is a hard error: the old
+        # silent skip left those cards neither in a hand nor on the table
+        # (vanishing from the game entirely).
         trick_leader = table_player if table else current_player
         table_state = TableState(trick_leader=trick_leader, pass_count=0)
         if table:
             parser = ComboParser(level)
             combo = parser.parse([Card.from_id(i) for i in table])
-            if combo:
-                table_state.record_play(table_player, combo)
+            if not combo:
+                raise ValueError("桌面牌不构成合法牌型")
+            table_state.record_play(table_player, combo)
 
         # All cards not in any hand or on table → played
         assigned = set()
@@ -420,8 +431,15 @@ def analyze_scenario():
     data = request.get_json() or {}
     scenario_id = data.get("scenario_id")
     model_profiles = data.get("models", [{"id": "blind"}])
-    perspective = int(data.get("perspective", 0))
-    debug = data.get("debug", False)
+    if not isinstance(model_profiles, list) or not model_profiles:
+        return jsonify({"error": "models must be a non-empty list"}), 400
+    try:
+        perspective = int(data.get("perspective", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "perspective must be an integer"}), 400
+    if not (0 <= perspective <= 3):
+        return jsonify({"error": "perspective must be 0-3"}), 400
+    debug = bool(data.get("debug", False))
 
     scenario = get_scenario_by_id(scenario_id) if scenario_id else None
     if not scenario:
@@ -576,6 +594,7 @@ def sim_init():
         return jsonify({"error": "Scenario not found"}), 404
 
     sid = uuid.uuid4().hex
+    _cleanup_sims()  # also sweep on create: init-only sims used to linger
     sim = Simulator(scenario)
     _simulators[sid] = (sim, time.time())
     state = sim.get_state()
@@ -639,9 +658,13 @@ def sim_init_custom():
     sid = uuid.uuid4().hex
     try:
         sim = Simulator.from_custom(hands, table, table_player, current_player, level)
+    except ValueError as e:
+        # Bad table combo etc. — client-fixable, not a server fault.
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"Failed to create simulator: {e}"}), 500
 
+    _cleanup_sims()  # also sweep on create: init-only sims used to linger
     _simulators[sid] = (sim, time.time())
     state = sim.get_state()
     state["sim_id"] = sid
@@ -672,14 +695,14 @@ def sim_step():
     if data.get("pass"):
         err = sim.apply_pass(player_id)
         if err:
-            return jsonify({"error": err})
+            return jsonify({"error": err}), 400
     else:
         card_ids = data.get("card_ids", [])
         if not card_ids:
-            return jsonify({"error": "No card_ids provided"})
+            return jsonify({"error": "No card_ids provided"}), 400
         err = sim.apply_play(player_id, card_ids)
         if err:
-            return jsonify({"error": err})
+            return jsonify({"error": err}), 400
 
     state = sim.get_state()
     state["sim_id"] = data["sim_id"]
@@ -750,16 +773,38 @@ def check_combo():
     card_ids = data.get("card_ids", [])
     level = data.get("level", 2)
 
+    if not isinstance(card_ids, list):
+        return jsonify({"valid": False, "combo_type": None,
+                        "error": "card_ids 必须是数组"}), 400
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return jsonify({"valid": False, "combo_type": None,
+                        "error": "level 必须是 2-14 的整数"}), 400
+    if not (2 <= level <= 14):
+        return jsonify({"valid": False, "combo_type": None,
+                        "error": "level 必须是 2-14"}), 400
+
     if not card_ids:
         return jsonify({"valid": True, "combo_type": None, "error": ""})
 
+    seen = set()
+    for cid in card_ids:
+        if not isinstance(cid, int) or not (0 <= cid <= 107):
+            return jsonify({"valid": False, "combo_type": None,
+                            "error": f"非法牌 ID: {cid}"}), 400
+        if cid in seen:
+            return jsonify({"valid": False, "combo_type": None,
+                            "error": f"重复牌 ID: {cid}"}), 400
+        seen.add(cid)
+
     try:
         cards = [Card.from_id(i) for i in card_ids]
+        parser = ComboParser(level)
+        combo = parser.parse(cards)
     except Exception:
-        return jsonify({"valid": False, "combo_type": None, "error": "Invalid card ID"})
-
-    parser = ComboParser(level)
-    combo = parser.parse(cards)
+        return jsonify({"valid": False, "combo_type": None,
+                        "error": "无法解析的牌型"}), 200
     if combo:
         return jsonify({
             "valid": True,
