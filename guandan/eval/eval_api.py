@@ -138,33 +138,35 @@ def _new_job(kind: str = "generic") -> str:
 
 
 def _set_progress(job_id: str, progress: float, message: str):
-    job = _jobs.get(job_id)
-    if job:
-        job["progress"] = max(0.0, min(1.0, progress))
-        job["message"] = message
-        job["heartbeat"] = time.time()
-        # A stalled job that reports progress again is alive again.
-        if job["status"] == "stalled":
-            job["status"] = "running"
+    with _JOBS_LOCK:
+        job = _jobs.get(job_id)
+        if job:
+            job["progress"] = max(0.0, min(1.0, progress))
+            job["message"] = message
+            job["heartbeat"] = time.time()
+            # A stalled job that reports progress again is alive again.
+            if job["status"] == "stalled":
+                job["status"] = "running"
 
 
 def _set_detail(job_id: str, detail: dict):
-    job = _jobs.get(job_id)
-    if not job:
-        return
-    job["heartbeat"] = time.time()
     try:
         size = len(json.dumps(detail, default=str))
     except (TypeError, ValueError):
         size = -1
-    if 0 < size > _DETAIL_LIMIT:
-        # Keep the live dashboard light: replace an oversized detail with a
-        # stub (progress bar + message still render fine).
-        keys = sorted(detail.keys()) if isinstance(detail, dict) else None
-        job["detail"] = {"truncated": True, "keys": keys, "approx_bytes": size}
-        job["detail_truncated"] = True
-    else:
-        job["detail"] = detail
+    with _JOBS_LOCK:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job["heartbeat"] = time.time()
+        if 0 < size > _DETAIL_LIMIT:
+            # Keep the live dashboard light: replace an oversized detail with a
+            # stub (progress bar + message still render fine).
+            keys = sorted(detail.keys()) if isinstance(detail, dict) else None
+            job["detail"] = {"truncated": True, "keys": keys, "approx_bytes": size}
+            job["detail_truncated"] = True
+        else:
+            job["detail"] = detail
 
 
 def _is_cancelled(job_id: str) -> bool:
@@ -184,12 +186,12 @@ def _spawn(jid: str, fn):
     def target():
         try:
             result = fn(progress_cb, live_cb)
-            _jobs[jid]["result"] = result
-            _jobs[jid]["status"] = "done"
-            _jobs[jid]["progress"] = 1.0
-            _jobs[jid]["message"] = "完成"
             # Auto-persist (never breaks the job): benchmarks/matches/RR
             # are recorded into the SQLite history store with their params.
+            # Persist OUTSIDE the lock (store I/O + git subprocess), then
+            # commit the terminal state atomically under the lock so
+            # job_status never observes a torn done/persisting view.
+            run_id = None
             try:
                 kind = _jobs[jid].get("kind", "generic")
                 params = _jobs[jid].get("params") or {}
@@ -199,17 +201,35 @@ def _spawn(jid: str, fn):
                     seed = int(seed)
                 else:
                     seed = None
-                _jobs[jid]["run_id"] = store_run(kind, params, result, seed=seed)
+                run_id = store_run(kind, params, result, seed=seed)
             except Exception:
                 pass
+            with _JOBS_LOCK:
+                job = _jobs.get(jid)
+                if not job:
+                    return
+                job["result"] = result
+                job["status"] = "done"
+                job["progress"] = 1.0
+                job["message"] = "完成"
+                job["run_id"] = run_id
         except JobCancelled:
-            _jobs[jid]["status"] = "cancelled"
-            _jobs[jid]["message"] = "已停止"
+            with _JOBS_LOCK:
+                job = _jobs.get(jid)
+                if job:
+                    job["status"] = "cancelled"
+                    job["message"] = "已停止"
         except Exception as e:
-            _jobs[jid]["status"] = "error"
-            _jobs[jid]["error"] = str(e)
+            with _JOBS_LOCK:
+                job = _jobs.get(jid)
+                if job:
+                    job["status"] = "error"
+                    job["error"] = str(e)
         finally:
-            _jobs[jid]["finished_at"] = time.time()
+            with _JOBS_LOCK:
+                job = _jobs.get(jid)
+                if job:
+                    job["finished_at"] = time.time()
     threading.Thread(target=target, daemon=True).start()
 
 
@@ -490,6 +510,10 @@ def _csv_escape(v):
     if v is None:
         return ""
     s = str(v)
+    # Formula-injection guard: cells starting with =+-@ execute as formulas
+    # in Excel/LibreOffice. model_name is user-editable, so prefix a tick.
+    if s.startswith(("=", "+", "-", "@")):
+        s = "'" + s
     if "," in s or '"' in s or "\n" in s:
         return '"' + s.replace('"', '""') + '"'
     return s

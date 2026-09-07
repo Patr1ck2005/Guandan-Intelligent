@@ -95,12 +95,53 @@ def test_run_tuner_budget_respected():
           f"{len(res['trials'])} trials)")
 
 
-def test_cancel_check_stops_early():
+def test_cancel_check_hard_cancels():
+    """A cancelled tuner must raise JobCancelled (→ '已停止', nothing
+    persisted) instead of returning a stored stopped_early result."""
+    import threading
+
+    from guandan.eval.eval_api import JobCancelled
+
     budget = TunerBudget(max_candidates=5, games_per_candidate=1,
                          max_seconds=60, max_workers=1, base_seed=9)
-    res = run_tuner(budget, cancel_check=lambda: True)
-    assert res["trials"] == [] or res["budget"]["stopped_early"]
-    print("  PASS cancel check")
+    with pytest.raises(JobCancelled):
+        run_tuner(budget, cancel_check=lambda: True)
+    print("  PASS cancel check (hard cancel)")
+
+
+def test_cancelled_tuner_job_not_persisted():
+    """End-to-end via the job API: cancel a tuner → status=cancelled, and
+    no new tuner row appears in the history store."""
+    import time as _time
+
+    from guandan.eval import eval_api as E
+    from guandan.eval import store
+    from guandan.eval.tuner import TunerBudget
+
+    store.reset_for_tests()
+    before = store.list_runs(kind="tuner", limit=1000)
+    real_run_tuner = E.__dict__.get("run_tuner")
+
+    # Direct spawn path: run_tuner inside _spawn with a cancel that trips
+    # immediately (mirrors the endpoint wiring).
+    def run(progress_cb, live_cb):
+        from guandan.eval.tuner import run_tuner as rt
+        return rt(TunerBudget(max_candidates=3, games_per_candidate=1,
+                              max_seconds=60, max_workers=1, base_seed=5),
+                  progress_cb=progress_cb, live_cb=live_cb,
+                  cancel_check=lambda: True)
+
+    jid = E._new_job("tuner")
+    E._jobs[jid]["cancel"] = True  # trip the check from the very first unit
+    E._spawn(jid, run)
+    for _ in range(100):
+        _time.sleep(0.05)
+        if E._jobs[jid]["status"] in ("cancelled", "done", "error"):
+            break
+    assert E._jobs[jid]["status"] == "cancelled", E._jobs[jid]
+    after = store.list_runs(kind="tuner", limit=1000)
+    assert len(after) == len(before), "cancelled tuner must not persist"
+    print("  PASS cancelled tuner not persisted")
 
 
 def test_tuner_apply_endpoint(tmp_path, monkeypatch):

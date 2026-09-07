@@ -136,6 +136,9 @@ class ScenarioBank:
     """
 
     def __init__(self, scenarios: Optional[List[Scenario]] = None):
+        import threading
+        # Job threads add while request threads read/persist — serialize.
+        self._lock = threading.Lock()
         self._scenarios: List[Scenario] = list(scenarios or [])
         self._by_id = {s.id: s for s in self._scenarios}
         self._load_persisted()
@@ -217,17 +220,22 @@ class ScenarioBank:
             pass  # best-effort persistence
 
     def add(self, scenarios: List[Scenario]):
-        added = False
-        for s in scenarios:
-            if s.id not in self._by_id:
-                self._scenarios.append(s)
-                self._by_id[s.id] = s
-                added = True
+        with self._lock:
+            added = False
+            for s in scenarios:
+                if s.id not in self._by_id:
+                    self._scenarios.append(s)
+                    self._by_id[s.id] = s
+                    added = True
         if added:
-            self._persist()
+            # Serialize the whole add+persist cycle: persisting reads
+            # self._scenarios, and a concurrent add used to be dropped.
+            with self._lock:
+                self._persist()
 
     def all(self) -> List[Scenario]:
-        return list(self._scenarios)
+        with self._lock:
+            return list(self._scenarios)
 
     def get(self, sid: str) -> Optional[Scenario]:
         return self._by_id.get(sid)

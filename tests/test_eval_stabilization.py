@@ -220,3 +220,66 @@ def test_compare_zero_metrics_not_green():
     from guandan.eval.regression import compare_metrics
     r = compare_metrics({}, {})
     assert r["verdict"] == "no-comparable-metrics"
+
+
+# ---------------------------------------------------------------------------
+# Audit M3 hardening: CSV formula injection, store path, job write locks
+# ---------------------------------------------------------------------------
+
+def test_csv_escape_formula_injection():
+    assert E._csv_escape("=cmd!A0").startswith("'")
+    assert E._csv_escape("@SUM(1)").startswith("'")
+    assert E._csv_escape("+1+1").startswith("'")
+    assert E._csv_escape("-1").startswith("'")
+    assert E._csv_escape("blind") == "blind"          # normal value untouched
+    assert E._csv_escape("a,b") == '"a,b"'            # quoting still works
+
+
+def test_store_default_db_path_is_absolute():
+    """CWD-relative path silently moved the history DB when the server was
+    started from another directory."""
+    import os
+    from guandan.eval import store
+    assert os.path.isabs(store._DEFAULT_DB)
+    assert store._DEFAULT_DB.endswith(os.path.join("data", "eval_history.db"))
+
+
+def test_job_spawn_terminal_state_atomic(monkeypatch):
+    """_spawn must commit result/status under _JOBS_LOCK: a status poll
+    during persistence used to observe a torn view."""
+    import time as _time
+
+    seen = []
+
+    def run(progress_cb, live_cb):
+        return {"ok": 1}
+
+    jid = E._new_job("generic")
+    orig_store = E.store_run if hasattr(E, "store_run") else None
+
+    # Slow the persistence import path so the post-persist lock window is
+    # observable; assert status stays "running" (not "done" without result)
+    # until the whole commit lands.
+    import guandan.eval.store as store_mod
+    real_store_run = store_mod.store_run
+
+    def slow_store_run(*a, **kw):
+        _time.sleep(0.3)
+        return real_store_run(*a, **kw)
+
+    monkeypatch.setattr(store_mod, "store_run", slow_store_run)
+    E._spawn(jid, run)
+    # sample status while persisting
+    _time.sleep(0.15)
+    j = E._jobs.get(jid)
+    seen.append((j["status"], j.get("result")))
+    for _ in range(100):
+        _time.sleep(0.05)
+        if E._jobs[jid]["status"] in ("done", "error", "cancelled"):
+            break
+    j2 = E._jobs[jid]
+    seen.append((j2["status"], j2.get("result")))
+    # During persistence: still running (no torn done-without-result)
+    assert seen[0][0] == "running" and seen[0][1] is None
+    # After: done WITH result, atomically
+    assert seen[1][0] == "done" and seen[1][1] == {"ok": 1}

@@ -76,7 +76,19 @@ def run_tuner(budget: TunerBudget, progress_cb=None, live_cb=None,
 
     Returns a JSON-safe dict: best weights, its win rate + Wilson CI,
     all candidate trials, budget actually consumed, and the seed.
+
+    Cancellation: ``cancel_check`` returning True raises ``JobCancelled``
+    (imported lazily to avoid the API-layer dependency) so a stopped tuner
+    behaves like every other job — no result, nothing persisted. The old
+    bool-driven early-stop returned a normal "done" result that got stored
+    with ``stopped_early`` and offered its half-searched weights for apply.
     """
+    from .eval_api import JobCancelled
+
+    def _check_cancel():
+        if cancel_check and cancel_check():
+            raise JobCancelled("cancelled")
+
     budget.clamp()
     t0 = time.time()
     rng = random.Random(budget.base_seed)
@@ -114,8 +126,7 @@ def run_tuner(budget: TunerBudget, progress_cb=None, live_cb=None,
 
     # Phase 1: coarse random search
     for i in range(budget.max_candidates):
-        if cancel_check and cancel_check():
-            break
+        _check_cancel()
         if time.time() - t0 > budget.max_seconds:
             break
         cand = _random_candidate(rng)
@@ -137,8 +148,7 @@ def run_tuner(budget: TunerBudget, progress_cb=None, live_cb=None,
     # Phase 2: local refinement around the best (if time + units remain)
     n_refine = max(1, budget.max_candidates // 3)
     for i in range(n_refine):
-        if cancel_check and cancel_check():
-            break
+        _check_cancel()
         if time.time() - t0 > budget.max_seconds:
             break
         if best is None:
@@ -172,7 +182,9 @@ def run_tuner(budget: TunerBudget, progress_cb=None, live_cb=None,
             "max_workers": budget.max_workers,
             "base_seed": budget.base_seed,
             "elapsed_s": round(time.time() - t0, 1),
-            "stopped_early": bool(cancel_check and cancel_check()),
+            # Cancelled runs never reach here (JobCancelled propagates);
+            # a time-budget exhaustion is a normal completed search.
+            "stopped_early": False,
         },
         "search_space": {k: list(v) for k, v in SEARCH_SPACE.items()},
         "note": "random search + local refinement; not guaranteed optimal",

@@ -72,8 +72,9 @@ async function init() {
 
 function setMode(mode) {
   // Refuse to silently kill a running job: a 10-minute tuner used to die
-  // just because the user clicked 历史.
-  if (E.jobId && mode !== E.mode && !confirm('有任务正在运行，切换页签会停止它。继续？')) return;
+  // just because the user clicked 历史. Same-tab clicks count too — they
+  // used to skip the confirm and cancel the job with zero feedback.
+  if (E.jobId && !confirm('有任务正在运行，切换页签会停止它。继续？')) return;
   // Silent cancel: clear E.jobId FIRST so the pending poll's stale-guard
   // swallows it — otherwise the "已停止" branch repaints the panel right
   // after setMode resets it (the ghost-message flash).
@@ -148,10 +149,15 @@ function chgModel(i, id) {
 }
 
 function renderMatchPicker() {
-  const opts = E.models.map((m, i) => `<option value="${i}">${escapeHtml(m.label || m.id)}</option>`).join('');
+  // Explicit `selected` marks: rebuilding the picker used to reset both
+  // selects to the first option while E.matchA/matchB kept the real values.
+  const opts = E.models.map((m, i) =>
+    `<option value="${i}"${i === E.matchA ? ' selected' : ''}>${escapeHtml(m.label || m.id)}</option>`).join('');
+  const optsB = E.models.map((m, i) =>
+    `<option value="${i}"${i === E.matchB ? ' selected' : ''}>${escapeHtml(m.label || m.id)}</option>`).join('');
   document.getElementById('match-picker').innerHTML =
     `<div class="param-row"><span>A（坐 0/2）</span><select onchange="E.matchA=+this.value">${opts}</select></div>` +
-    `<div class="param-row"><span>B（坐 1/3）</span><select onchange="E.matchB=+this.value">${opts}</select></div>`;
+    `<div class="param-row"><span>B（坐 1/3）</span><select onchange="E.matchB=+this.value">${optsB}</select></div>`;
 }
 
 // ==================================================================
@@ -195,7 +201,11 @@ function renderParamPanel() {
   else if (E.mode === 'roundrobin') btn = runBtn('开始循环赛', 'runRoundRobin');
   else if (E.mode === 'generate') btn = runBtn('生成题库', 'runGenerate');
   else if (E.mode === 'tuner') btn = runBtn('开始调参', 'runTuner');
-  const stop = E.jobId ? `<button class="btn btn-red" onclick="stopJob()">停止</button>` : '';
+  // Stop only once a REAL job id exists — during the 'pending' optimistic
+  // lock there is nothing to cancel, and a click used to 404-cancel
+  // /jobs/pending while the actual request was still in flight.
+  const stop = (E.jobId && E.jobId !== 'pending')
+    ? `<button class="btn btn-red" onclick="stopJob()">停止</button>` : '';
   document.getElementById('run-panel').innerHTML = `<div style="display:flex;gap:6px">${btn}${stop}</div>`;
 }
 
@@ -210,10 +220,11 @@ async function runBenchmark() {
   const el = document.getElementById('eval-result');
   if (E.jobId) return;
   if (!E.models.length) { el.innerHTML = '<div class="bad">请先添加至少一个模型</div>'; return; }
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">启动基准…</div>';
   const body = { models: collectModels(), max_scenarios: E.maxScenarios };
   const d = await postJob('/api/eval/benchmark', body, el);
-  if (!d || !d.job_id) return;   // postJob already reported the error
+  if (!d || !d.job_id) { _unlockJobId(); return; }   // postJob already reported the error
   startJob(d.job_id, renderBenchmark);
 }
 
@@ -237,6 +248,19 @@ function renderBenchmark(d) {
   document.getElementById('eval-result').innerHTML = h;
 }
 
+// Optimistic lock: E.jobId is set BEFORE the POST so a double-click can't
+// fire two jobs (the second click now sees a busy E.jobId). Cleared when
+// the start fails.
+function _lockJobId() {
+  if (E.jobId) return false;
+  E.jobId = 'pending';
+  renderParamPanel();
+  return true;
+}
+function _unlockJobId() {
+  if (E.jobId === 'pending') { E.jobId = null; renderParamPanel(); }
+}
+
 // ==================================================================
 // Run — match / round-robin / generate (async)
 // ==================================================================
@@ -247,10 +271,11 @@ async function runMatch() {
     el.innerHTML = '<div class="bad">自对弈需要两个不同的模型（左侧「+ 模型」添加）</div>';
     return;
   }
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">启动自对弈…</div>';
   const body = { a: collectModels()[E.matchA], b: collectModels()[E.matchB], n_games: E.nGames, seed: E.seed, agent_timeout_ms: E.timeoutMs, max_workers: E.maxWorkers };
   const d = await postJob('/api/eval/match', body, el);
-  if (!d || !d.job_id) return;
+  if (!d || !d.job_id) { _unlockJobId(); return; }
   startJob(d.job_id, renderMatch);
 }
 
@@ -258,20 +283,22 @@ async function runRoundRobin() {
   const el = document.getElementById('eval-result');
   if (E.jobId) return;
   if (E.models.length < 2) { el.innerHTML = '<div class="bad">循环赛至少需要两个模型</div>'; return; }
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">启动循环赛…</div>';
   const body = { models: collectModels(), n_games: E.nGames, seed: E.seed, agent_timeout_ms: E.timeoutMs, max_workers: E.maxWorkers };
   const d = await postJob('/api/eval/round_robin', body, el);
-  if (!d || !d.job_id) return;
+  if (!d || !d.job_id) { _unlockJobId(); return; }
   startJob(d.job_id, renderRoundRobin);
 }
 
 async function runGenerate() {
   const el = document.getElementById('eval-result');
   if (E.jobId) return;
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">生成题库中（精确解标注，可能较慢）…</div>';
   const body = { n: E.genN, max_cards: E.genMaxCards, seed: E.genSeed, time_limit_ms: E.genTimeLimit };
   const d = await postJob('/api/eval/scenarios/generate', body, el);
-  if (!d || !d.job_id) return;
+  if (!d || !d.job_id) { _unlockJobId(); return; }
   startJob(d.job_id, renderGenerate);
 }
 
@@ -282,11 +309,12 @@ async function runGenerate() {
 async function runTuner() {
   const el = document.getElementById('eval-result');
   if (E.jobId) return;
+  if (!_lockJobId()) return;
   el.innerHTML = '<div class="running">启动调参（随机搜索 + 局部细化）…</div>';
   const body = { max_candidates: E.tunerCands, games_per_candidate: E.tunerGames,
                  max_seconds: E.tunerSeconds, max_workers: E.tunerWorkers, seed: E.tunerSeed };
   const d = await postJob('/api/eval/tuner', body, el);
-  if (!d || !d.job_id) return;
+  if (!d || !d.job_id) { _unlockJobId(); return; }
   startJob(d.job_id, renderTunerResult);
 }
 
@@ -316,6 +344,9 @@ function renderTunerResult(res) {
       `<tr><td>${escapeHtml(k)}</td><td class="mono">${v}</td><td class="mono">[${(res.search_space[k] || [])[0]}, ${(res.search_space[k] || [])[1]}]</td></tr>`).join('') + '</table>';
   h += '<h3>全部试验</h3><table class="ev"><tr><th>#</th><th>胜率</th><th>Wilson</th><th>胜/负</th><th>seed</th></tr>' +
     (res.trials || []).map((t, i) => `<tr><td>${i + 1}</td><td>${(t.win_rate * 100).toFixed(1)}%</td><td class="mono">[${t.wilson[0]}–${t.wilson[1]}]</td><td>${t.wins}/${t.losses}</td><td class="mono">${t.seed}</td></tr>`).join('') + '</table>';
+  // A hard-cancelled tuner never reaches here (JobCancelled → 已停止).
+  // stopped_early now only means the time budget ran out — still a complete
+  // (if truncated) search, so applying its best weights remains legitimate.
   h += `<div style="margin-top:10px;display:flex;gap:8px">
     <button class="btn btn-gn" onclick="applyTunerWeights()">应用最优权重到 config.json</button>
     <button class="btn btn-gy" onclick="renderHistory()">查看历史</button></div>`;
@@ -374,13 +405,14 @@ async function postJob(url, body, el) {
 function startJob(jobId, renderFn) {
   if (!jobId) return;
   if (E.jobTimer) { clearTimeout(E.jobTimer); E.jobTimer = null; }
-  if (E.jobId && E.jobId !== jobId) {
+  if (E.jobId && E.jobId !== jobId && E.jobId !== 'pending') {
     // A previous job was still running — best-effort cancel it.
     fetch('/api/eval/jobs/' + E.jobId + '/cancel', { method: 'POST' }).catch(() => {});
   }
   E.jobId = jobId;
   E.jobStart = Date.now();
   E.jobRetries = 0;
+  E.stopping = false;
   E.jobRenderFn = renderFn || null;
   renderParamPanel();       // show the stop button
   pollJob(jobId, renderFn);
@@ -390,14 +422,17 @@ function finishJob() {
   E.jobId = null;
   E.jobStart = null;
   E.jobRetries = 0;
+  E.stopping = false;
   E.jobRenderFn = null;
   renderParamPanel();       // hide the stop button
 }
 
 async function stopJob() {
   if (!E.jobId) return;
+  if (E.jobTimer) { clearTimeout(E.jobTimer); E.jobTimer = null; }  // no double poll chains
   const jobId = E.jobId;
   const renderFn = E.jobRenderFn;
+  E.stopping = true;
   try {
     await fetch('/api/eval/jobs/' + jobId + '/cancel', { method: 'POST' });
   } catch (e) { /* server may be slow; still mark stopping */ }
@@ -421,9 +456,44 @@ async function pollJob(jobId, renderFn) {
     const d = await r.json();
     if (E.jobId !== jobId) return; // superseded while awaiting
     E.jobRetries = 0;              // reset on any successful poll
+    if (E.stopping) {
+      // User pressed 停止: keep the stopping notice visible until the
+      // terminal poll lands instead of flashing progress bars over it.
+      if (d.status === 'done') {
+        if (renderFn) renderFn(d.result);
+        else document.getElementById('eval-result').innerHTML = '<div class="ok">任务已完成（结果已入历史）</div>';
+        E.stopping = false;
+        finishJob();
+        return;
+      }
+      if (d.status === 'cancelled' || d.status === 'error') {
+        document.getElementById('eval-result').innerHTML = d.status === 'cancelled'
+          ? '<div style="color:#e67e22">已停止</div>'
+          : '<div class="bad">错误: ' + escapeHtml(d.error) + '</div>';
+        E.stopping = false;
+        finishJob();
+        return;
+      }
+      E.jobTimer = setTimeout(() => pollJob(jobId, renderFn), 800);
+      return;
+    }
     if (d.status === 'done') {
       if (renderFn) renderFn(d.result);
-      else document.getElementById('eval-result').innerHTML = '<div class="ok">任务已完成（结果已入历史）</div>';
+      else if (d.run_id == null) {
+        // store_run failures are swallowed server-side; run_id null means
+        // the result did NOT reach history — don't claim it did.
+        document.getElementById('eval-result').innerHTML = '<div class="bad">任务已完成，但历史入库失败（结果仅存在于本页）</div>';
+      } else {
+        document.getElementById('eval-result').innerHTML = '<div class="ok">任务已完成（结果已入历史）</div>';
+      }
+      finishJob();
+      return;
+    }
+    if (d.status === 'stalled') {
+      // Heartbeat watchdog tripped: the job thread is wedged. Polling forever
+      // showed a fake "运行中" — terminate the UI view and free the button.
+      document.getElementById('eval-result').innerHTML =
+        '<div class="bad">任务疑似停滞（心跳超时）— 可停止后重跑</div>';
       finishJob();
       return;
     }
@@ -718,6 +788,7 @@ async function loadRegressionSection() {
   if (!box) return;
   try {
     const r = await fetch('/api/eval/regression/latest');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const d = await r.json();
     if (!d.run) {
       box.innerHTML = '<div class="emp">尚无回归记录 — <button class="btn btn-gn" onclick="runRegression()">运行回归套件</button></div>';
@@ -854,14 +925,21 @@ async function renderHistCompare() {
   const bId = document.getElementById('hist-cmp-b')?.value;
   const box = document.getElementById('hist-compare');
   if (!aId || !bId || !box) return;
+  // Sequence guard: flipping A then B quickly used to let the slower
+  // (earlier) response overwrite the newer one.
+  const seq = (E.cmpSeq = (E.cmpSeq || 0) + 1);
   try {
     const [ra, rb] = await Promise.all([
-      fetch('/api/eval/history/' + aId).then(r => r.json()),
-      fetch('/api/eval/history/' + bId).then(r => r.json()),
+      fetch('/api/eval/history/' + aId),
+      fetch('/api/eval/history/' + bId),
     ]);
-    box.innerHTML = compareTable(ra, rb);
+    if (!ra.ok || !rb.ok) throw new Error('HTTP ' + (!ra.ok ? ra.status : rb.status));
+    if (seq !== E.cmpSeq) return;
+    const a = await ra.json(), b = await rb.json();
+    box.innerHTML = compareTable(a, b);
   } catch (e) {
-    box.innerHTML = '<div class="bad">对比加载失败</div>';
+    if (seq !== E.cmpSeq) return;
+    box.innerHTML = '<div class="bad">对比加载失败: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -898,6 +976,7 @@ async function renderRunDetail(id) {
   el.innerHTML = '<div class="emp">加载详情…</div>';
   try {
     const r = await fetch('/api/eval/history/' + id);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const run = await r.json();
     let h = `<div><button class="btn btn-gy" onclick="renderHistory()">← 返回列表</button></div>`;
     h += `<h3>#${run.id} · ${escapeHtml(run.kind)} · ${escapeHtml(run.ts_utc || '')}</h3>`;

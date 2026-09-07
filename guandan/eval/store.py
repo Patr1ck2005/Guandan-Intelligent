@@ -54,7 +54,9 @@ CREATE INDEX IF NOT EXISTS idx_runs_epoch ON runs(epoch_s);
 CREATE INDEX IF NOT EXISTS idx_run_models_run ON run_models(run_id);
 """
 
-_DEFAULT_DB = os.path.join("data", "eval_history.db")
+_DEFAULT_DB = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "eval_history.db")
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.Lock()
 
@@ -116,6 +118,7 @@ def store_run(kind: str, params: dict, result: dict,
         conn = _get_conn(db_path)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         summary = _extract_summary(kind, result)
+        git_sha = _git_commit()  # subprocess (≤5s) must not hold the DB lock
         with _lock:
             cur = conn.execute(
                 "INSERT INTO runs(ts_utc, epoch_s, kind, params_json, seed,"
@@ -124,7 +127,7 @@ def store_run(kind: str, params: dict, result: dict,
                 (ts, time.time(), kind, json.dumps(params, ensure_ascii=False,
                                                    default=str),
                  seed, json.dumps(summary, ensure_ascii=False, default=str),
-                 _git_commit(), notes))
+                 git_sha, notes))
             run_id = cur.lastrowid
             rows = _extract_model_rows(kind, result)
             conn.executemany(
