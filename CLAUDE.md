@@ -51,7 +51,7 @@ LLM Module (guandan/ai/llm/)  — end-to-end LLM-driven decisions
 Web UI (guandan/ui/web/)
   app.py (Flask routes) + arena_api.py + eval_api.py (Flask blueprints)
   templates/ (Jinja2 HTML), static/ (vanilla JS + CSS)
-  static/lib/ (api.js, card.js, constants.js, store.js), eval.js/eval.css (Eval Lab)
+  static/lib/ (api.js — game-page client only), eval.js/eval.css (Eval Lab)
 ```
 
 ## Key Conventions

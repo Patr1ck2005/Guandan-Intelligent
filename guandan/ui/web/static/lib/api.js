@@ -1,6 +1,11 @@
 /* ================================================================
-   Guandan Web UI — Centralized API Client
-   Loaded as regular <script> before game.js and arena.js
+   Guandan Web UI — Game-page API client
+   Loaded as a regular <script> by game.html only.
+   arena.js / eval.js are self-contained and call fetch() directly:
+   arena's analysis calls need a caller-owned AbortController signal
+   (start/stop buttons) and multi-minute time budgets, which don't fit
+   this wrapper's default timeout — unifying them was evaluated and
+   rejected in the round-4 architecture audit.
    ================================================================ */
 
 var _API_TIMEOUT = 15000;
@@ -61,19 +66,4 @@ window.gameApi = {
   getSuggest:    function()     { return _apiRequest('/api/suggest', { timeout: 60000 }); },
   evaluate:      function(ids)  { return _apiRequest('/api/evaluate', { method: 'POST', body: { card_ids: ids }, timeout: 60000 }); },
   toggleAutoPlay:function(en)   { return _apiRequest('/api/auto_play', { method: 'POST', body: { enabled: en } }); },
-};
-
-window.arenaApi = {
-  getModels:       function()       { return _apiRequest('/api/arena/models'); },
-  getScenarios:    function(cat)    { return _apiRequest('/api/arena/scenarios' + (cat ? '?category=' + cat : '')); },
-  getScenario:     function(id)     { return _apiRequest('/api/arena/scenarios/' + id); },
-  getPerspectives: function(id)     { return _apiRequest('/api/arena/scenarios/' + id + '/perspectives'); },
-  analyzeScenario: function(data)   { return _apiRequest('/api/arena/analyze/scenario', { method: 'POST', body: data, timeout: 60000 }); },
-  benchmark:       function(data)   { return _apiRequest('/api/arena/benchmark', { method: 'POST', body: data, timeout: 120000 }); },
-  simInit:         function(data)   { return _apiRequest('/api/arena/sim/init', { method: 'POST', body: data }); },
-  simInitCustom:   function(data)   { return _apiRequest('/api/arena/sim/init_custom', { method: 'POST', body: data }); },
-  simState:        function(simId)  { return _apiRequest('/api/arena/sim/state', { method: 'POST', body: { sim_id: simId } }); },
-  simStep:         function(simId, d){ return _apiRequest('/api/arena/sim/step', { method: 'POST', body: Object.assign({ sim_id: simId }, d) }); },
-  simAnalyze:      function(simId, m){ return _apiRequest('/api/arena/sim/analyze', { method: 'POST', body: { sim_id: simId, models: m }, timeout: 60000 }); },
-  checkCombo:      function(ids, lv) { return _apiRequest('/api/arena/check_combo', { method: 'POST', body: { card_ids: ids, level: lv } }); },
 };

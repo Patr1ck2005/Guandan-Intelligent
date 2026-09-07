@@ -124,13 +124,10 @@ guandan/
             ├── eval.css
             ├── tokens.css
             ├── game.js          # 对战页前端逻辑
-            ├── arena.js         # Arena 前端逻辑
-            ├── eval.js          # Eval Lab 前端逻辑
+            ├── arena.js         # Arena 前端逻辑（自包含，直接 fetch）
+            ├── eval.js          # Eval Lab 前端逻辑（自包含，直接 fetch）
             └── lib/
-                ├── api.js       # API 客户端封装（fetch + AbortController + 超时）
-                ├── card.js      # 卡牌渲染工具
-                ├── constants.js # 前端常量
-                └── store.js     # 状态存储
+                └── api.js       # 对局页专用 API 客户端（fetch + AbortController + 超时）
 
 tests/
 ├── test_core.py             # 核心引擎测试（含固定 5 张顺子边界矩阵）
