@@ -4,7 +4,7 @@ import pytest
 
 from guandan.eval.elo import expected_score, update as elo_update
 from guandan.eval.metrics import (
-    wilson_interval, is_correct, agreement_rate, entropy, regret,
+    wilson_interval, is_correct, agreement_rate,
 )
 from guandan.eval.scenario_bank import (
     load_curated_scenarios, grade_difficulty, ScenarioBank,
@@ -54,14 +54,9 @@ class TestMetrics:
         assert is_correct([], None, expected_pass=True, pass_chosen=True)
         assert not is_correct([], None, expected_pass=True, pass_chosen=False)
 
-    def test_agreement_and_entropy(self):
+    def test_agreement(self):
         assert agreement_rate(['a', 'a', 'b']) == pytest.approx(2 / 3)
-        assert entropy(['a', 'a', 'a']) == pytest.approx(0.0)
-        assert entropy([]) == 0.0
-
-    def test_regret(self):
-        assert regret(0.3, 0.9) == pytest.approx(0.6)
-        assert regret(0.9, 0.3) == 0.0
+        assert agreement_rate([]) == 0.0
 
 
 # ==================================================================

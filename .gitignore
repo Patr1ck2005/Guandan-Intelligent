@@ -38,5 +38,7 @@ _check.js
 _interact.js
 _shot.js
 _screenshots/
+tools/_audit_shots/
+tools/_audit_shots_eval/
 
 data/

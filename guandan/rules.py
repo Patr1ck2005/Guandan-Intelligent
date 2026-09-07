@@ -84,11 +84,8 @@ class RulesEngine:
 
         # Table has a combo — must beat it
         if not can_beat(combo, table_state.current_combo):
-            # Determine why
-            if combo.is_bomb and not table_state.current_combo.is_bomb:
-                # Bomb beats non-bomb — should be OK, but can_beat said no
-                # This can only happen if new is NOT a bomb
-                pass
+            # Determine why (a bomb vs non-bomb can't reach here: can_beat
+            # would have accepted it, so no special bomb branch is needed).
             if not combo.is_bomb and table_state.current_combo.is_bomb:
                 return ValidationResult(False, PlayLegality.TOO_WEAK, combo)
             if combo.combo_type != table_state.current_combo.combo_type:

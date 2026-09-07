@@ -246,13 +246,3 @@ def _find_largest_non_bomb(cards: List[Card], parser, level: int) -> Optional[Li
 
     # Fallback: any single
     return [normals[0]] if normals else [wilds[0]] if wilds else None
-
-
-def count_control_cards(hand: Tuple[Card, ...]) -> Dict[str, int]:
-    """Count control cards in a hand."""
-    return {
-        "big_joker": sum(1 for c in hand if c.rank == Rank.BIG_JOKER),
-        "small_joker": sum(1 for c in hand if c.rank == Rank.SMALL_JOKER),
-        "aces": sum(1 for c in hand if c.rank == Rank.A),
-        "bombs": 0,  # filled by caller if needed
-    }

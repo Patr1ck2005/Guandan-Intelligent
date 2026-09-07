@@ -61,7 +61,3 @@ class TestableModel:
             card_ids = set(result.choice.card_ids)
             return [c for c in view.my_hand if c.id in card_ids]
         return []
-
-    @classmethod
-    def list_params(cls) -> Dict[str, Any]:
-        return cls.config_schema

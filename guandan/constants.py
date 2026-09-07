@@ -30,3 +30,10 @@ SUIT_DISPLAY = {0: 'C', 1: 'D', 2: 'H', 3: 'S', 4: ''}
 # Ranks that cannot appear in straights
 STRAIGHT_FORBIDDEN_RANKS = frozenset({2, 15, 16})
 STRAIGHT_MAX_START = 10  # 10,J,Q,K,A
+
+# ComboType(int) → 中文名. Single source of truth — four modules used to
+# carry private copies that drifted independently.
+COMBO_TYPE_CN = {
+    1: "单张", 2: "对子", 3: "三条", 4: "三带二",
+    5: "顺子", 6: "连对", 7: "钢板", 8: "炸弹", 9: "同花顺", 10: "天王炸",
+}

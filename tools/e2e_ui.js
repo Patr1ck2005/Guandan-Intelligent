@@ -260,6 +260,96 @@ async function waitFor(page, selector, timeoutMs) {
   check(rejectOk, 'sim/init_custom rejects illegal table combo with 400 (no vanishing cards)');
   expectErrorStatus = false;
 
+  // ---- 8. Arena custom UI full flow: real 开始推演 click (H4 regression) ----
+  console.log('== arena custom UI flow ==');
+  // H4 was a TypeError thrown inside customStart BEFORE confirm() — only a
+  // real click catches it (API-level e2e never did). Dialog handler accepts
+  // the confirm; alert() failures are recorded.
+  let dialogMsg = null;
+  let sawConfirm = false;
+  page.once('dialog', async d => {
+    dialogMsg = d.message();
+    if (d.type() === 'confirm') { sawConfirm = true; await d.accept(); }
+    else await d.dismiss();
+  });
+  // Fill the board deterministically through the UI's own state: 27 cards
+  // per player via the 随机每人27张 button, then click 开始推演.
+  await page.click('text=随机每人27张');
+  await page.waitForTimeout(300);
+  await page.click('#btn-ac');
+  await page.waitForTimeout(1500);
+  check(sawConfirm, '开始推演 shows confirm dialog (C.hands.map regression fixed)');
+  const inSimMode = await page.evaluate(() =>
+    !!document.querySelector('#crcnt') && typeof C !== 'undefined' && typeof C.simId === 'string' && !!C.simId);
+  check(inSimMode, 'custom start enters sim mode with a live sim_id');
+  if (inSimMode) {
+    // Wait for the sim-mode button to become the enabled 分析 control
+    // (customStart's finally clause relabels it after init completes).
+    const analysisReady = await waitFor(page, '#btn-ac:text-is("分析")', 10000);
+    check(analysisReady, 'custom sim button becomes 分析 after init');
+    // 分析 runs all 4 default C-tab models into this tab
+    await page.click('#btn-ac');
+    const cDone = await waitFor(page, '#crcnt:has-text("(4/4)")', 90000);
+    check(cDone, 'custom sim 分析 runs 4/4 models');
+    const cErrs = await page.evaluate(() =>
+      [...document.querySelectorAll('#cres .me')].map(e => e.textContent));
+    check(cErrs.length === 0, `custom sim analysis has no model errors (${cErrs.join(';') || 'clean'})`);
+    // 编辑 returns to builder; button label restored (M1 finishC semantics)
+    await page.click('text=编辑');
+    await page.waitForTimeout(400);
+    const btnLabel = await page.evaluate(() =>
+      document.getElementById('btn-ac')?.textContent);
+    check(btnLabel === '开始推演', `编辑 restores 开始推演 label (got: ${btnLabel})`);
+  }
+  await page.screenshot({ path: path.join(outDir, 'e2e_ui_custom_flow.png') });
+
+  // ---- 9. Arena perspectives: every seat shows a nonzero hand size (M7) ----
+  console.log('== arena perspectives ==');
+  await page.click('.atab:has-text("真实牌桌")');
+  await page.waitForTimeout(800);
+  const perspInfo = await page.evaluate(async () => {
+    const sid = (typeof T !== 'undefined') ? T.sid : null;
+    if (!sid) return null;
+    const r = await fetch('/api/arena/scenarios/' + sid + '/perspectives');
+    const d = await r.json();
+    return [1, 2, 3].map(p => d.perspectives[String(p)]?.my_hand_size ?? -1);
+  });
+  check(Array.isArray(perspInfo) && perspInfo.every(v => v > 0),
+    `perspectives 1/2/3 report nonzero hand sizes (${JSON.stringify(perspInfo)})`);
+
+  // ---- 10. Eval tuner cancel: hard cancel → 已停止, nothing persisted ----
+  console.log('== eval tuner cancel ==');
+  await page.goto(base + '/eval', { waitUntil: 'networkidle' });
+  await page.click('.etab[data-mode="tuner"]');
+  await page.waitForTimeout(300);
+  // shrink the budget via the UI inputs (候选数 1, 每组局数 1, 预算最小 30)
+  await page.evaluate(() => {
+    const inputs = document.querySelectorAll('#param-panel input[type="number"]');
+    // order: 候选数 / 每组局数 / 预算秒 / 并行 / 种子
+    const set = (el, v) => { el.value = String(v); el.dispatchEvent(new Event('change')); };
+    if (inputs.length >= 3) { set(inputs[0], 2); set(inputs[1], 1); set(inputs[2], 30); }
+  });
+  const histBefore = await page.evaluate(async () =>
+    (await (await fetch('/api/eval/history?limit=200')).json()).runs.filter(r => r.kind === 'tuner').length);
+  await page.click('button.btn-gn:has-text("开始调参")');
+  // The stop button only appears once a REAL job id exists (pending lock
+  // hides it), so clicking it is guaranteed to hit the live job.
+  const tuningStarted = await waitFor(page, 'button.btn-red:has-text("停止")', 15000);
+  if (tuningStarted) {
+    await page.waitForTimeout(300);   // let the POST land + job register
+    await page.click('button.btn-red:has-text("停止")');
+    const stopped = await waitFor(page, 'text=已停止', 30000);
+    check(stopped, 'tuner cancel shows 已停止 (hard cancel, not stopped_early panel)');
+    await page.waitForTimeout(1500);
+    const histAfter = await page.evaluate(async () =>
+      (await (await fetch('/api/eval/history?limit=200')).json()).runs.filter(r => r.kind === 'tuner').length);
+    check(histAfter === histBefore,
+      `cancelled tuner not persisted (${histBefore} -> ${histAfter})`);
+  } else {
+    console.log('  SKIP tuner cancel (job finished too fast to stop)');
+  }
+  await page.screenshot({ path: path.join(outDir, 'e2e_ui_tuner_cancel.png') });
+
   console.log('--- errors:', errors.length);
   errors.slice(0, 15).forEach(e => console.log(' ', e));
   await browser.close();

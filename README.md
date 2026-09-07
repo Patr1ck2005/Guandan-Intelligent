@@ -108,22 +108,26 @@ guandan/
 │   ├── regression.py    # 回归基线套件（红/绿徽章）
 │   └── tuner.py         # AIParams 自动调参（随机搜索 + 预算硬上限）
 └── ui/
-    ├── interactive.py   # 交互式对局接口（step-driven）
+    ├── interactive.py   # 交互式对局接口（step-driven，会话锁 + 结算幂等）
     └── web/
-        ├── app.py       # Flask 主应用（Game API）
-        ├── arena_api.py # Arena API（Flask Blueprint）
+        ├── app.py       # Flask 主应用（Game API + 会话管理）
+        ├── arena_api.py # Arena API（Flask Blueprint，模拟器带锁 TTL 池）
+        ├── eval_api.py  # Eval Lab API（job 调度 / 历史 / 导出 / tuner）
         ├── templates/
         │   ├── menu.html
         │   ├── game.html
-        │   └── arena.html
+        │   ├── arena.html
+        │   └── eval.html
         └── static/
             ├── style.css
             ├── arena.css
+            ├── eval.css
             ├── tokens.css
-            ├── game.js          # 主游戏前端逻辑 (~1037 行)
+            ├── game.js          # 对战页前端逻辑
             ├── arena.js         # Arena 前端逻辑
+            ├── eval.js          # Eval Lab 前端逻辑
             └── lib/
-                ├── api.js       # API 客户端封装（fetch + AbortController）
+                ├── api.js       # API 客户端封装（fetch + AbortController + 超时）
                 ├── card.js      # 卡牌渲染工具
                 ├── constants.js # 前端常量
                 └── store.js     # 状态存储
@@ -137,13 +141,23 @@ tests/
 ├── test_eval_jobs.py        # 任务管理（上限/心跳/停滞/截断）
 ├── test_eval_store.py       # SQLite 历史库
 ├── test_eval_history_api.py # 历史 API + 导出
+├── test_eval_stabilization.py # Eval 输入校验/调优应用/题库隔离
 ├── test_selfplay_mp.py      # 多进程自对弈（确定性/崩溃隔离）
 ├── test_teammate_heuristics.py # 2v2 队友权重
 ├── test_opp_modeling.py     # 公开信息对手建模
+├── test_sampler_seats.py    # 采样器全座位矩阵（防座位硬编码回归）
 ├── test_regression.py       # 回归基线对比逻辑
-└── test_tuner.py            # 自动调参器
+├── test_tuner.py            # 自动调参器（硬取消语义）
+├── test_interactive_guardrails.py # 对局状态机护栏（幂等结算/超时/锁）
+├── test_web_api.py          # Game API 输入健壮性
+└── test_arena_stabilization.py    # Arena API 校验/竞态护栏
 
-config.json              # AI 模型参数配置（Schema 驱动）
+tools/
+├── e2e_ui.js          # Playwright 按钮级 e2e（对战/评估/Arena 全链路）
+├── e2e_demo.py        # API 级端到端（基准→入库→导出→回归→调参）
+└── visual_audit.js    # 4 页视觉巡检 + 控制台错误扫描
+
+config.json              # AI 模型参数配置（Schema 驱动，gitignored）
 CLAUDE.md                # Claude Code 项目文档
 ```
 
@@ -233,11 +247,23 @@ CLAUDE.md                # Claude Code 项目文档
 - `eval_api.py`（~700 行）按 benchmark / match / history / tuner 拆分为子模块
 - 调参器升级：候选间共享评估的贝叶斯优化 / 更大预算的消耗性搜索
 - 人类还贡横幅的确定性 e2e 触发（当前依赖随机发牌，已标注 skip）
+- ISMCTS 重写为深层树搜索（当前为 1 层 UCB 候选评审，文案已如实标注）
+- MonteCarloAgent / MCDecider 双栈合并、CardCounter → CardTracker 收敛
+- MC 决策器 pass 真实打分（需先建"应让牌"题库场景）
+- Arena 题库扩充 sampling / endgame / opening 类别（当前 12 题全为 deduction）
+
+## 部署约束
+
+- **单进程运行**：`python -m guandan.ui.web.app`（或 启动服务.bat）。所有会话/任务/
+  配置锁与内存态均为进程内对象，Gunicorn 多 worker 部署会使它们失效——文档与
+  启动脚本均按单进程口径维护。
+- `config.json` 由游戏页「AI设置」与 Eval「应用调优权重」两个端点写入，共享
+  `_CONFIG_WRITE_LOCK` 并原子替换；文件不入 git，坏写不可 git 恢复。
 
 ## 验收工具
 
 ```bash
 node tools/visual_audit.js   # 4 页视觉检验 + 控制台错误扫描（需 npx playwright install chromium）
-node tools/e2e_ui.js         # 按钮级 e2e：整局对战 / 基准 / 历史 / 回归
+node tools/e2e_ui.js         # 按钮级 e2e：整局对战 / 基准 / 历史 / 回归 / Arena 自定义推演
 python tools/e2e_demo.py     # API 级端到端：基准→入库→导出→回归→调参
 ```

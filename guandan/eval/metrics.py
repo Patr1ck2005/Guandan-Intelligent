@@ -35,17 +35,3 @@ def agreement_rate(labels: List[str]) -> float:
         return 0.0
     counts = Counter(labels)
     return counts.most_common(1)[0][1] / len(labels)
-
-
-def entropy(labels: List[str]) -> float:
-    """Shannon entropy (nats) of a distribution over discrete labels."""
-    if not labels:
-        return 0.0
-    n = len(labels)
-    counts = Counter(labels)
-    return -sum((c / n) * math.log(c / n) for c in counts.values())
-
-
-def regret(chosen_value: float, optimal_value: float) -> float:
-    """Value regret: optimal_value - chosen_value (0.0 = optimal)."""
-    return max(0.0, optimal_value - chosen_value)

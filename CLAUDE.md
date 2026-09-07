@@ -57,12 +57,13 @@ Web UI (guandan/ui/web/)
 ## Key Conventions
 
 - **Cards**: integer IDs 0–107 (two 54-card decks). `Card.from_id(n)` creates; `Card.display` renders.
-- **Immutability**: `Card`, `Combo`, and `GameState` use `@dataclass(frozen=True)`. State changes return new objects via `state_utils.clone_state()`.
+- **Immutability**: `Card` and `Combo` use `@dataclass(frozen=True, slots=True)`. `GameState` is a plain (non-frozen) dataclass by convention — treat it as immutable and mutate only via `state_utils` helpers (`clone_state`, `apply_play`, …).
 - **Agent interface**: `BaseAgent.choose_play(view: PlayerView) -> List[Card]`. Return `[]` to pass.
-- **PlayerView**: filters opponent hands to sizes only — agents never see opponent cards.
-- **Registry pattern**: Add a model to `registry.py` SchemaBuilder → frontend auto-discovers (zero JS changes).
+- **PlayerView**: filters opponent hands to sizes only — agents never see opponent cards. Samplers derive the opponent set from `view.player_id`; never hardcode seat numbers.
+- **Registry pattern**: Add a model to `registry.py` SchemaBuilder → the config panel auto-discovers it. Note: arena.js `MODEL_INFO` and eval.js `MODEL_PARAMS` carry hardcoded UI metadata — new deciders/inner models need entries there too (descriptions/params only, no wiring).
 - **Config**: `config.json` at project root. Schema-driven; defaults auto-generated from model params.
 - **Logging**: `from guandan.logging import ai_log` — categories: game, ai, web, system. Ring buffer (10k entries) + file + console.
+- **Deployment**: single-process only (Flask dev server / one Gunicorn worker). Session games, eval jobs, and config locks are in-process objects.
 
 ## AI Agent Types
 
@@ -70,7 +71,7 @@ Web UI (guandan/ui/web/)
 |-------|-----------|-------------|
 | `HeuristicAgent` | `blind` | Greedy AIParams-weighted scoring (fast, no simulation) |
 | `MonteCarloAgent` | `mc` | Sample opponent hands → simulate → vote by win rate |
-| `ISMCTSDecider` | `ismcts` | Info-set MCTS: UCB selection → expansion → simulation |
+| `ISMCTSDecider` | `ismcts` | UCB candidate evaluation: per-candidate win-rate simulation, robust-child pick (current implementation is 1-level UCB, no deep tree expansion) |
 | `LLMAgent` | `llm` | **NEW** DeepSeek API end-to-end decision (candidate or free mode) |
 
 ### LLM Agent Setup

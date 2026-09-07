@@ -343,9 +343,7 @@ class _Node:
         }
 
 
-_COMBO_TYPE_CN = {
-    1: "单张", 2: "对子", 3: "三条", 4: "三带二",
-    5: "顺子", 6: "连对", 7: "钢板", 8: "炸弹", 9: "同花顺", 10: "天王炸",
-}
+# Canonical map lives in constants.COMBO_TYPE_CN.
+from ..constants import COMBO_TYPE_CN as _COMBO_TYPE_CN
 
 
