@@ -138,8 +138,10 @@ def api_state():
 @app.route("/api/play", methods=["POST"])
 def api_play():
     game = _get_game()
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     card_ids = data.get("card_ids", [])
+    if not isinstance(card_ids, list):
+        card_ids = []
     if not card_ids:
         return jsonify(game.get_state())
     result = game.play_cards(card_ids)
@@ -164,8 +166,10 @@ def api_start_game():
 def api_tribute_return():
     """Human (as tribute receiver) submits the card to return (还贡)."""
     game = _get_game()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     card_ids = data.get("card_ids", [])
+    if not isinstance(card_ids, list):
+        card_ids = []
     result = game.submit_tribute_return(card_ids)
     return jsonify(result)
 
@@ -230,10 +234,14 @@ def api_debug():
 
 @app.route("/api/log")
 def api_log():
-    """Query log entries with optional filters."""
+    """Query log entries with optional filters (garbage-tolerant)."""
     category = request.args.get("category")
     level = request.args.get("level")
-    count = int(request.args.get("count", 200))
+    try:
+        count = int(request.args.get("count", 200))
+    except (TypeError, ValueError):
+        count = 200
+    count = max(1, min(count, 2000))
     from ...logging import game_logger
     entries = game_logger.query(category=category, level=level, count=count)
     return jsonify({"entries": entries, "count": len(entries)})
@@ -360,25 +368,50 @@ def api_llm_reasoning():
     })
 
 
+def _strip_nones(obj):
+    """Drop null values anywhere in a config payload.
+
+    The frontend number inputs yield NaN for empty fields, which JSON
+    serializes to null; storing those into config.json used to brick
+    agent creation (int(None) TypeError) for every subsequent game.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_nones(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_nones(v) for v in obj]
+    if isinstance(obj, float) and (obj != obj or obj in (float("inf"), float("-inf"))):
+        return None
+    return obj
+
+
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     """Get or update AI configuration."""
     game = _get_game()
     if request.method == "POST":
-        data = request.get_json()
+        data = request.get_json(silent=True)
         if data:
             if "decider" in data:
-                game.config["decider"] = data["decider"]
+                game.config["decider"] = _strip_nones(data["decider"])
             if "inner_model" in data:
-                game.config["inner_model"] = data["inner_model"]
+                game.config["inner_model"] = _strip_nones(data["inner_model"])
             if "enumerator" in data:
-                game.config["enumerator"] = data["enumerator"]
+                game.config["enumerator"] = _strip_nones(data["enumerator"])
             if "players" in data:
-                for pid, cfg in data["players"].items():
-                    p = int(pid)
-                    game.config["players"][p] = cfg
+                players = data.get("players")
+                if not isinstance(players, dict):
+                    return jsonify({"error": "players must be an object"}), 400
+                for pid, cfg in players.items():
+                    try:
+                        p = int(pid)
+                    except (TypeError, ValueError):
+                        return jsonify({"error": f"invalid player id: {pid}"}), 400
+                    if not (0 <= p <= 3):
+                        return jsonify({"error": f"player id out of range: {pid}"}), 400
+                    if cfg is not None:
+                        game.config["players"][p] = _strip_nones(cfg)
             if "auto_play" in data:
-                game._auto_play = data["auto_play"]
+                game._auto_play = bool(data["auto_play"])
             try:
                 _CONFIG_PATH.write_text(json.dumps(game.config, indent=2), encoding="utf-8")
             except OSError:
@@ -537,13 +570,12 @@ def api_evaluate():
 
 @app.route("/api/auto_play", methods=["POST"])
 def api_auto_play():
-    """Toggle full auto-play mode."""
+    """Toggle full auto-play mode (guarded: refuses at round-over / pending
+    tribute / before start — arming the AI loop in those states used to
+    re-settle the round or bypass the tribute exchange)."""
     game = _get_game()
-    data = request.get_json() or {}
-    game._auto_play = data.get("enabled", False)
-    if game._auto_play and game.state is not None:
-        game._ai_running = True
-    return jsonify({"auto_play": game._auto_play})
+    data = request.get_json(silent=True) or {}
+    return jsonify(game.set_auto_play(bool(data.get("enabled", False))))
 
 
 @app.route("/api/new_round", methods=["POST"])

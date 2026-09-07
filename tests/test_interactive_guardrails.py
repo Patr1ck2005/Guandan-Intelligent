@@ -1,0 +1,207 @@
+"""Guardrails for the interactive game state machine.
+
+Regression tests for the button-level acceptance audit (M1 stabilization):
+  - round settlement is idempotent (auto-play toggling at round-over must
+    never double-advance team levels);
+  - set_auto_play refuses illegal states (round over / pending tribute /
+    before start);
+  - an AI leader whose play is illegal or whose agent crashes is forced to
+    play instead of freezing the round with a leader pass;
+  - null values in saved AI configs cannot brick agent creation.
+"""
+
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from guandan.ui.interactive import InteractiveGame
+
+
+def _fresh_game() -> InteractiveGame:
+    g = InteractiveGame(level=2, agent_timeout_ms=0)
+    g.start_new_round()
+    return g
+
+
+def _force_round_over(g: InteractiveGame) -> None:
+    """Pretend three players finished so the round is settleable."""
+    assert g.state is not None
+    g.state.finished_positions = [1, 2, 0]
+    g._finish_round()
+
+
+# ---------------------------------------------------------------------------
+# Idempotent round settlement (probe A: double settlement via auto-play toggle)
+# ---------------------------------------------------------------------------
+
+def test_finish_round_is_idempotent():
+    g = _fresh_game()
+    _force_round_over(g)
+    levels = list(g.team_levels)
+    n_results = len(g._round_results)
+
+    g._finish_round()
+    g._finish_round()
+
+    assert list(g.team_levels) == levels
+    assert len(g._round_results) == n_results
+
+
+def test_rearmed_ai_after_round_over_does_not_resettle():
+    """The old api_auto_play re-armed _ai_running while the round-over panel
+    was up; each subsequent /api/state poll re-ran settlement."""
+    g = _fresh_game()
+    _force_round_over(g)
+    levels = list(g.team_levels)
+    n_results = len(g._round_results)
+
+    g._ai_running = True  # simulate the old buggy re-arm
+    g.get_state()
+    g.get_state()
+
+    assert list(g.team_levels) == levels
+    assert len(g._round_results) == n_results
+    assert g._ai_running is False
+
+
+def test_set_auto_play_refused_at_round_over():
+    g = _fresh_game()
+    _force_round_over(g)
+
+    state = g.set_auto_play(True)
+
+    assert state["error"] is True
+    assert state["auto_play"] is False
+    assert g._auto_play is False
+    assert g._ai_running is False
+
+    # a state poll afterwards still settles nothing new
+    g.get_state()
+    assert len(g._round_results) == 1
+
+
+def test_set_auto_play_refused_while_pending_tribute_return():
+    g = _fresh_game()
+    g._pending_return = SimpleNamespace(paid_card=None)
+
+    state = g.set_auto_play(True)
+
+    assert state["error"] is True
+    assert g._auto_play is False
+    assert g._ai_running is False
+
+
+def test_set_auto_play_refused_before_start():
+    g = InteractiveGame(level=2, agent_timeout_ms=0)
+    g.start_new_round()
+    g._game_started = False
+
+    state = g.set_auto_play(True)
+
+    assert state["error"] is True
+    assert g._ai_running is False
+
+
+def test_set_auto_play_disable_always_allowed():
+    g = _fresh_game()
+    g._auto_play = True
+    g._ai_running = True
+
+    state = g.set_auto_play(False)
+
+    assert state["error"] is False
+    assert g._auto_play is False
+
+
+# ---------------------------------------------------------------------------
+# AI leader cannot stall the round (probe B/audit: leader pass freezes play)
+# ---------------------------------------------------------------------------
+
+class _PassAgent:
+    def choose_play(self, view):
+        return []
+
+
+class _BoomAgent:
+    def choose_play(self, view):
+        raise RuntimeError("boom")
+
+
+def _seat_ai_leader(g: InteractiveGame) -> None:
+    g._game_started = True
+    g.state.current_player = 1
+    g._ai_running = True
+
+
+def test_ai_leader_illegal_pass_is_forced_to_play(monkeypatch):
+    from guandan.ai import registry
+
+    g = _fresh_game()
+    _seat_ai_leader(g)
+    monkeypatch.setattr(registry, "create_agent_for_player",
+                        lambda cfg, pid: _PassAgent())
+
+    g.get_state()
+
+    # The trick must have a play on the table — never a leader pass.
+    assert g.state.table.current_combo is not None
+    assert g.state.table.trick_history
+    first_player, first_combo = g.state.table.trick_history[0]
+    assert first_player == 1 and first_combo is not None
+
+
+def test_ai_agent_crash_falls_back_to_forced_play(monkeypatch):
+    from guandan.ai import registry
+
+    g = _fresh_game()
+    _seat_ai_leader(g)
+    monkeypatch.setattr(registry, "create_agent_for_player",
+                        lambda cfg, pid: _BoomAgent())
+
+    g.get_state()  # must not raise
+
+    assert g.state.table.current_combo is not None
+
+
+# ---------------------------------------------------------------------------
+# Null-config immunity (probe E: null num_samples bricked /api/state)
+# ---------------------------------------------------------------------------
+
+def test_mc_agent_with_null_params_still_created():
+    from guandan.ai.registry import create_agent_for_player
+
+    cfg = {
+        "players": {1: {"decider": "mc",
+                        "params": {"num_samples": None, "time_limit_ms": None}}},
+        "decider": {"default_model": "mc",
+                    "model_params": {"mc": {"num_samples": 128,
+                                            "time_limit_ms": 10000,
+                                            "inner": "informed",
+                                            "enumerator": "top_n",
+                                            "sampler": "random"}}},
+        "inner_model": {"model_params": {"informed": {"round_weight": None}}},
+        "enumerator": {"model_params": {"top_n": {"top_n": None}}},
+    }
+
+    agent = create_agent_for_player(cfg, 1)  # must not raise
+    assert agent is not None
+
+
+def test_ai_params_from_dict_skips_none():
+    from guandan.ai.params import AIParams
+
+    p = AIParams.from_dict({"pass_threshold": None, "round_weight": None,
+                            "efficiency_weight": 10.0})
+    assert p.pass_threshold == 0.0   # default preserved
+    assert p.round_weight == 8.0     # default preserved
+    assert p.efficiency_weight == 10.0  # explicit value kept
+
+
+def test_game_lock_serializes_public_api():
+    g = _fresh_game()
+    acquired = g._lock.acquire(timeout=1.0)
+    try:
+        assert acquired, "lock must be free outside of calls"
+    finally:
+        g._lock.release()

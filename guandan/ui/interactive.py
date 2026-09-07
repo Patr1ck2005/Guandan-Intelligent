@@ -8,6 +8,7 @@ move and auto-plays AI turns until it's the human's turn again.
 from __future__ import annotations
 
 import random
+import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Dict, List, Optional, Tuple
 
@@ -70,6 +71,15 @@ class InteractiveGame:
         self._auto_human_pending = False
         self._game_started = False
         self._human_win_rate = None
+        # Idempotency guard: the round_number whose result was already settled.
+        # Re-arming _ai_running (e.g. by toggling auto-play while the round-over
+        # panel is up) must never settle the same round twice — that used to
+        # double-advance team levels and duplicate the scoreboard entry.
+        self._settled_round: Optional[int] = None
+        # Session lock: Flask dev server is threaded; overlapping /api/state
+        # polls plus button POSTs used to race the state machine (double AI
+        # steps, double settlement). One lock serializes every entry point.
+        self._lock = threading.RLock()
         # Action log — memory module
         from ..ai.action_log import ActionLog
         self.action_log = ActionLog()
@@ -79,12 +89,52 @@ class InteractiveGame:
     # ------------------------------------------------------------------
 
     def start_new_round(self) -> dict:
+        with self._lock:
+            return self._start_new_round_locked()
+
+    def _start_new_round_locked(self) -> dict:
         """Deal a new round and return the initial state for the frontend."""
         if self._game_over:
             return self._build_state()
         return self._start_round()
 
+    def set_auto_play(self, enabled: bool) -> dict:
+        """Toggle auto-play with guard rails.
+
+        Returns the state payload; on refusal it carries error=True plus a
+        message. Auto-play is refused while a round is over (the 下一局
+        button owns the transition), while the game is over, while a
+        tribute return is pending, or before the game started — arming the
+        AI loop in those states used to re-run settlement or bypass the
+        tribute exchange.
+        """
+        with self._lock:
+            if enabled:
+                err = None
+                if self._game_over:
+                    err = "游戏已结束"
+                elif self.state is not None and len(self.state.finished_positions) >= 3:
+                    err = "本局已结束，请先点「下一局」"
+                elif self._pending_return is not None:
+                    err = "请先完成还贡再开启自动对局"
+                elif not self._game_started:
+                    err = "请先点击「开始游戏」"
+                if err:
+                    state = self._build_state(error=err)
+                    state["auto_play"] = False
+                    return state
+            self._auto_play = bool(enabled)
+            if self._auto_play and self.state is not None and not self._game_over:
+                self._ai_running = True
+            state = self._build_state()
+            state["auto_play"] = self._auto_play  # None-state payload lacks it
+            return state
+
     def play_cards(self, card_ids: List[int]) -> dict:
+        with self._lock:
+            return self._play_cards_locked(card_ids)
+
+    def _play_cards_locked(self, card_ids: List[int]) -> dict:
         """Human plays the given cards."""
         if self._game_over:
             return self._build_state()
@@ -106,11 +156,17 @@ class InteractiveGame:
         return self._process_human_play(cards)
 
     def pass_turn(self) -> dict:
+        with self._lock:
+            return self._pass_turn_locked()
+
+    def _pass_turn_locked(self) -> dict:
         """Human passes. Returns updated state. Async AI processing."""
         if self._game_over:
             return self._build_state()
         if self._pending_return is not None:
             return self._build_state(error="请先完成还贡")
+        if not self._game_started:
+            return self._build_state(error="请先点击「开始游戏」")
         if self._ai_running:
             return self._build_state(error="AI思考中，请等待")
         if not self._is_human_turn():
@@ -121,17 +177,25 @@ class InteractiveGame:
         return self._process_human_pass()
 
     def start_game(self) -> dict:
+        with self._lock:
+            return self._start_game_locked()
+
+    def _start_game_locked(self) -> dict:
         """Called when human clicks '开始游戏'. Triggers AI if needed."""
         if self._game_started:
             return self._build_state()
         self._game_started = True
-        if self.state is not None:
+        if self.state is not None and self._pending_return is None:
             starter = self.state.current_player
-            if starter != self.HUMAN_ID:
+            if starter != self.HUMAN_ID or self._auto_play:
                 self._ai_running = True
         return self._build_state()
 
     def submit_tribute_return(self, card_ids: List[int]) -> dict:
+        with self._lock:
+            return self._submit_tribute_return_locked(card_ids)
+
+    def _submit_tribute_return_locked(self, card_ids: List[int]) -> dict:
         """Human (as tribute receiver) returns the selected card."""
         if self._pending_return is None:
             return self._build_state(error="当前没有待还贡的牌")
@@ -164,9 +228,10 @@ class InteractiveGame:
 
     def get_state(self) -> dict:
         """Return current game state. If AI is running, process one AI turn."""
-        if self._ai_running and self.state is not None:
-            self._step_one_ai()
-        return self._build_state()
+        with self._lock:
+            if self._ai_running and self.state is not None:
+                self._step_one_ai()
+            return self._build_state()
 
     def _is_human_turn(self) -> bool:
         """Check if it's currently the human's turn."""
@@ -188,6 +253,11 @@ class InteractiveGame:
     def _start_round(self) -> dict:
         self.round_number += 1
         self._acc_trick_history = []  # reset accumulated history for new round
+        # Reset per-round interaction state: a stale tribute banner or a
+        # pending return from a previous round must never leak into a
+        # fresh deal.
+        self._pending_return = None
+        self._tribute_banner = ""
 
         deck = Deck.shuffle(Deck.create())
         hands = Deck.deal(deck)
@@ -261,9 +331,15 @@ class InteractiveGame:
 
     def _start_round_after_tribute(self) -> dict:
         """After the human's 还贡, hands already reflect the exchange.
-        Just clear pending state and return the updated view."""
+        Clear pending state and resume the round: arm the AI loop when the
+        starter is an AI seat or auto-play is on (the game may have been
+        started while the return was still pending)."""
         self._pending_return = None
         self._message = ""
+        if self._game_started and self.state is not None:
+            starter = self.state.current_player
+            if starter != self.HUMAN_ID or self._auto_play:
+                self._ai_running = True
         return self._build_state()
 
     # ------------------------------------------------------------------
@@ -314,6 +390,12 @@ class InteractiveGame:
             return
         if len(self.state.finished_positions) >= 3:
             self._finish_round()
+            self._ai_running = False
+            return
+        if self._pending_return is not None:
+            # Tribute exchange unresolved: never let the AI act (the human
+            # slot is awaiting the return, and AI seats must not move past
+            # an un-exchanged hand).
             self._ai_running = False
             return
 
@@ -391,26 +473,40 @@ class InteractiveGame:
     # ------------------------------------------------------------------
 
     def _ai_play(self, player_id: int):
-        """Have an AI player make a move (with restricted view)."""
+        """Have an AI player make a move (with restricted view).
+
+        Never raises and never leaves the game stalled: an agent that
+        crashes (e.g. poisoned numeric params) or an illegal play is
+        downgraded to a forced legal play — passing as trick leader is
+        forbidden by the rules and used to freeze the round forever.
+        """
         from ..ai.player_view import PlayerView
         from ..ai.registry import create_agent_for_player
         hand = self.state.hands[player_id]
 
-        agent = create_agent_for_player(self.config, player_id)
-        view = PlayerView(self.state, player_id, self.action_log)
+        play_cards = None
+        try:
+            agent = create_agent_for_player(self.config, player_id)
+            view = PlayerView(self.state, player_id, self.action_log)
 
-        if self.agent_timeout_ms > 0:
-            timeout_s = self.agent_timeout_ms / 1000
-            try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(agent.choose_play, view)
-                    play_cards = future.result(timeout=timeout_s)
-            except FutureTimeoutError:
-                game_logger.warning("agent_timeout", player=player_id,
-                                    timeout_ms=self.agent_timeout_ms)
-                play_cards = self._force_play(player_id, hand)
-        else:
-            play_cards = agent.choose_play(view)
+            if self.agent_timeout_ms > 0:
+                timeout_s = self.agent_timeout_ms / 1000
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(agent.choose_play, view)
+                        play_cards = future.result(timeout=timeout_s)
+                except FutureTimeoutError:
+                    game_logger.warning("agent_timeout", player=player_id,
+                                        timeout_ms=self.agent_timeout_ms)
+                    play_cards = None
+            else:
+                play_cards = agent.choose_play(view)
+        except Exception as e:
+            game_logger.warning("agent_error", player=player_id, error=str(e)[:200])
+            play_cards = None
+
+        if play_cards is None:
+            play_cards = self._force_play(player_id, hand)
 
         result = self.rules.validate_play(
             cards=play_cards,
@@ -421,12 +517,34 @@ class InteractiveGame:
         )
 
         if not result.is_legal:
-            self.state.table.record_pass(player_id)
-            self.action_log.record_pass(self.state.trick_number, player_id, self.state.table.current_combo)
-            self.state.current_player = (player_id + 1) % 4
-            return
+            is_leader = (self.state.table.is_empty
+                         or self.state.table.last_played_player == player_id)
+            if is_leader:
+                # A leader cannot pass — force the smallest legal play so the
+                # trick (and the round) can proceed.
+                forced = self._force_play(player_id, hand)
+                result = self.rules.validate_play(
+                    cards=forced,
+                    hand=hand,
+                    table_state=self.state.table,
+                    player_id=player_id,
+                    finished_positions=self.state.finished_positions,
+                )
+                if not result.is_legal:
+                    # Truly pathological hand — pass and accept the stall risk;
+                    # _force_play covering a normal hand makes this unreachable.
+                    self.state.table.record_pass(player_id)
+                    self.action_log.record_pass(self.state.trick_number, player_id, self.state.table.current_combo)
+                    self.state.current_player = (player_id + 1) % 4
+                    return
+                play_cards = forced
+            else:
+                self.state.table.record_pass(player_id)
+                self.action_log.record_pass(self.state.trick_number, player_id, self.state.table.current_combo)
+                self.state.current_player = (player_id + 1) % 4
+                return
 
-        if play_cards:
+        if result.resolved_combo is not None and play_cards:
             self._apply_play(player_id, play_cards, result.resolved_combo)
         else:
             self.state.table.record_pass(player_id)
@@ -517,8 +635,20 @@ class InteractiveGame:
         return self.state is not None and len(self.state.finished_positions) >= 3
 
     def _finish_round(self) -> dict:
-        """Calculate round result and check for game over."""
+        """Calculate round result and check for game over.
+
+        Idempotent per round: re-entry after settlement (e.g. _ai_running
+        re-armed while the round-over panel is up) returns the already
+        recorded state instead of scoring the round again — the old
+        behavior double-advanced team levels and duplicated scoreboard
+        entries.
+        """
+        if self._settled_round == self.round_number and self._round_results:
+            self._ai_running = False
+            return self._build_state()
+        self._settled_round = self.round_number
         self._auto_human_pending = False
+        self._ai_running = False
         result = calculate_result(self.state.finished_positions)
         self._round_results.append(result)
 

@@ -154,6 +154,7 @@ DEFAULT_CONFIG = {
 # ==================================================================
 
 def _make_inner_agent(inner_id: str, params: dict):
+    params = _strip_bad_params(params)
     if inner_id == "informed":
         from .models.informed_scorer import InformedScorer
         return InformedScorer(**params)
@@ -169,14 +170,41 @@ def _make_inner_agent(inner_id: str, params: dict):
         return BlindAgent(params=AIParams.from_dict(p) if p else DEFA)
 
 
+def _strip_bad_params(params: dict) -> dict:
+    """Drop null / non-finite values that sneak in through saved configs
+    (the frontend's empty number inputs serialize as null)."""
+    out = {}
+    for k, v in (params or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            continue
+        out[k] = v
+    return out
+
+
+def _to_int(params: dict, key: str, dflt: int) -> int:
+    try:
+        return int(params.get(key, dflt))
+    except (TypeError, ValueError):
+        return dflt
+
+
+def _to_float(params: dict, key: str, dflt: float) -> float:
+    try:
+        return float(params.get(key, dflt))
+    except (TypeError, ValueError):
+        return dflt
+
+
 def create_agent_for_player(config: dict, player_id: int):
     """Create outer agent from config."""
     player_cfg = config.get("players", {}).get(player_id, {})
     decider_id = player_cfg.get("decider") or config.get("decider", {}).get("default_model", "mc")
-    params = player_cfg.get("params") or {}
+    params = _strip_bad_params(player_cfg.get("params") or {})
     # Merge with defaults
     defaults = config.get("decider", {}).get("model_params", {}).get(decider_id, {})
-    params = {**defaults, **params}
+    params = {**_strip_bad_params(defaults), **params}
 
     if decider_id in ("mc", "ismcts"):
         sampler_id = params.get("sampler", "random")
@@ -190,7 +218,7 @@ def create_agent_for_player(config: dict, player_id: int):
         from .candidate_enum import create_enumerator
         enum_kw = {}
         if enumerator_id == "top_n":
-            enum_kw["top_n"] = params.get("top_n", 5)
+            enum_kw["top_n"] = _to_int(params, "top_n", 5)
             enum_kw["pre_scorer"] = params.get("pre_scorer", "blind")
         enumerator = create_enumerator(enumerator_id, **enum_kw)
 
@@ -198,21 +226,22 @@ def create_agent_for_player(config: dict, player_id: int):
             from .ismcts import ISMCTSDecider
             return ISMCTSDecider(
                 sampler=sampler, inner=inner, enumerator=enumerator,
-                max_iterations=int(params.get("max_iterations", 500)),
-                time_limit_ms=int(params.get("time_limit_ms", 10000)),
-                ucb_c=float(params.get("ucb_c", 1.4)),
+                max_iterations=_to_int(params, "max_iterations", 500),
+                time_limit_ms=_to_int(params, "time_limit_ms", 10000),
+                ucb_c=_to_float(params, "ucb_c", 1.4),
                 config=config)
 
         from .mc_decider import MCDecider
         return MCDecider(
             sampler=sampler, inner=inner, enumerator=enumerator,
-            num_samples=int(params.get("num_samples", 128)),
-            time_limit_ms=int(params.get("time_limit_ms", 10000)),
+            num_samples=max(1, _to_int(params, "num_samples", 128)),
+            time_limit_ms=_to_int(params, "time_limit_ms", 10000),
             config=config)
     elif decider_id == "llm":
         from .llm import LLMAgent, LLMConfig
         llm_fields = {f.name for f in LLMConfig.__dataclass_fields__.values()}
-        llm_params = {k: v for k, v in params.items() if k in llm_fields}
+        llm_params = {k: v for k, v in params.items()
+                      if k in llm_fields and v is not None}
         return LLMAgent(config=LLMConfig(**llm_params))
     else:
         return _make_inner_agent("blind", params)

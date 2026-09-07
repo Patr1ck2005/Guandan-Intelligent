@@ -63,7 +63,10 @@ class AIParams:
 
     @classmethod
     def from_dict(cls, d: dict) -> AIParams:
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        # None values (null in saved JSON) would override the dataclass
+        # defaults and later break numeric comparisons — skip them.
+        return cls(**{k: v for k, v in d.items()
+                      if k in cls.__dataclass_fields__ and v is not None})
 
 
 # Default instance
