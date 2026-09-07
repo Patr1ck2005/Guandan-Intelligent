@@ -129,3 +129,19 @@ def test_auto_play_response_shape(client):
     body = r.get_json()
     assert "auto_play" in body
     assert "error" in body
+
+
+# ---------------------------------------------------------------------------
+# /api/evaluate — off-turn guard (round-3 audit M1)
+# ---------------------------------------------------------------------------
+
+def test_evaluate_off_turn_returns_error_not_500(client):
+    """The AI step state machine may be mid-move; evaluating must be refused
+    with a graceful payload instead of racing the lock (a 6s MC read of
+    hands used to run concurrently with a locked /api/state step)."""
+    r = _post_json(client, "/api/evaluate", {"card_ids": [0, 1]})
+    assert r.status_code == 200
+    body = r.get_json()
+    # Either the game hasn't started ("游戏未开始") or it isn't our turn —
+    # never an exception / 500.
+    assert body.get("error") in ("游戏未开始", "不是你的回合")

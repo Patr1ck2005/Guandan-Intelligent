@@ -337,11 +337,13 @@ class InteractiveGame:
             trick_number=0,
         )
 
-        # Don't auto-start AI — wait for "开始游戏" button
-        self._game_started = False
-        self._ai_running = False
+        # Manual mode: wait for the "开始游戏" button each round. Auto-play
+        # keeps running across rounds — re-showing the start overlay forced
+        # one extra click per round, contradicting "AI 代打".
+        self._game_started = bool(self._auto_play)
+        self._ai_running = bool(self._auto_play)
         self._auto_human_pending = False
-        self._message = "点击「开始游戏」" if not self._game_started else ""
+        self._message = "" if self._auto_play else "点击「开始游戏」"
         return self._build_state()
 
     def _start_round_after_tribute(self) -> dict:

@@ -80,8 +80,15 @@ function stopPolling() {
   }
 }
 
+// In-flight guards: a double-click on 出牌/过/自动对局 used to fire two
+// POSTs; the second always failed server-side ("AI思考中" / toggled the
+// auto flag straight back off) and flashed a spurious error banner.
+let _playInFlight = false;
+let _passInFlight = false;
+let _autoToggleInFlight = false;
+
 async function playCards() {
-  if (!myTurn) return;
+  if (!myTurn || _playInFlight) return;
   let cardIds;
 
   if (activeStrip !== null && activeStrip < comboStrips.length) {
@@ -92,11 +99,14 @@ async function playCards() {
     return;
   }
 
+  _playInFlight = true;
   try {
     gameState = await gameApi.playCards(cardIds);
   } catch (e) {
     showGameError('出牌请求失败: ' + e.message);
     return;
+  } finally {
+    _playInFlight = false;
   }
   selectedCards.clear();
   activeStrip = null;
@@ -114,12 +124,15 @@ async function playCards() {
 }
 
 async function passTurn() {
-  if (!myTurn) return;
+  if (!myTurn || _passInFlight) return;
+  _passInFlight = true;
   try {
     gameState = await gameApi.passTurn();
   } catch (e) {
     showGameError('过牌请求失败: ' + e.message);
     return;
+  } finally {
+    _passInFlight = false;
   }
   selectedCards.clear();
   activeStrip = null;
@@ -129,6 +142,8 @@ async function passTurn() {
 }
 
 async function newGame() {
+  // A mis-click discards the whole match (levels, scoreboard, combos).
+  if (!confirm('开始新游戏？当前对局进度将丢弃。')) return;
   try {
     gameState = await gameApi.newGame();
   } catch (e) {
@@ -177,10 +192,13 @@ async function showHint() {
   }
   selectedCards.clear();
   activeStrip = null;
-  if (data.card_ids) {
-    for (const id of data.card_ids) selectedCards.add(id);
-  }
   render();
+  if (data.card_ids && data.card_ids.length > 0) {
+    for (const id of data.card_ids) selectedCards.add(id);
+    render();
+  } else {
+    showGameError('没有能压过牌桌的牌型，建议过牌');
+  }
 }
 
 async function fetchDebug() {
@@ -260,8 +278,9 @@ function render() {
   if (!gameState) return;
   myTurn = gameState.my_turn;
 
-  // Start overlay
-  const started = gameState.game_started;
+  // Start overlay: auto-play runs across rounds, so the "开始游戏" overlay
+  // only applies in manual mode (auto rounds used to re-show it every round).
+  const started = gameState.game_started || gameState.auto_play;
   const overlay = document.getElementById('start-overlay');
   if (overlay) overlay.style.display = started ? 'none' : 'block';
   document.getElementById('controls').style.display = started ? 'block' : 'none';
@@ -305,6 +324,9 @@ function render() {
   document.getElementById('btn-pass').disabled = !myTurn || !gameState.can_pass;
   document.getElementById('btn-hint').disabled = !myTurn;
   document.getElementById('btn-suggest').disabled = !myTurn;
+  // Same myTurn guard as suggest — the backend now rejects off-turn
+  // evaluation, so greying the button out keeps intent visible.
+  document.getElementById('btn-evaluate').disabled = !myTurn;
   document.getElementById('btn-organize').disabled = selectedCards.size === 0;
   // Auto-play button state
   const autoBtn = document.getElementById('btn-auto-play');
@@ -633,8 +655,11 @@ function toggleCard(cardId) {
   render();
 }
 
-// Keyboard shortcuts
+// Keyboard shortcuts — skipped while typing/focusing interactive controls:
+// Enter in a config number field used to fire a card play, and Space could
+// never toggle checkboxes because it was always preventDefault'ed.
 document.addEventListener('keydown', (e) => {
+  if (e.target.closest('input, select, textarea, button, a, [contenteditable]')) return;
   if (e.key === 'Enter') {
     e.preventDefault();
     if (myTurn && (selectedCards.size > 0 || activeStrip !== null)) playCards();
@@ -916,14 +941,18 @@ async function startGame() {
 // ==================================================================
 
 async function toggleAutoPlay() {
+  if (_autoToggleInFlight) return;   // double-click = enable then instantly disable
   const btn = document.getElementById('btn-auto-play');
   const isAuto = gameState ? gameState.auto_play : btn.textContent.includes('停止');
+  _autoToggleInFlight = true;
   let d;
   try {
     d = await gameApi.toggleAutoPlay(!isAuto);
   } catch (e) {
     showGameError('自动对局切换失败: ' + e.message);
     return;
+  } finally {
+    _autoToggleInFlight = false;
   }
   btn.textContent = d.auto_play ? '停止自动' : '自动对局';
   btn.style.background = d.auto_play ? '#c0392b' : '#555';
@@ -1169,8 +1198,10 @@ async function fetchConfig() {
   try {
     d = await gameApi.getConfig();
   } catch (e) {
-    document.getElementById('config-panel').innerHTML =
-      '<div style="padding:16px;color:#e74c3c">配置加载失败: ' + e.message + '</div>';
+    // Render into a tab content area, NOT the whole panel: replacing the
+    // panel innerHTML used to destroy the header's close button too.
+    const el = document.getElementById('cfg-tabcontent-global');
+    if (el) el.innerHTML = '<div style="padding:12px;color:#e74c3c">配置加载失败: ' + e.message + '</div>';
     return;
   }
   schema = d.schema || {};
@@ -1212,22 +1243,43 @@ function saveToConfig(playerId) {
       currentConfig.players[playerId].params[k] = val;
     }
   }
+  // Inner model params (global tab only — backend scope is global). These
+  // used to be silently dropped on save, leaving MC/ISMCTS inner models
+  // untunable from the UI.
+  if (playerId === null) {
+    const innerRef = Object.entries(deciderDef.params || {}).find(([k,p]) => p.ref_category === 'inner_model');
+    if (innerRef) {
+      const innerId = (currentConfig.decider.model_params[deciderId] || {})[innerRef[0]] || innerRef[1].default || 'informed';
+      const innerCat = (schema.inner_model || {}).models || {};
+      const innerDef = innerCat[innerId] || {};
+      if (!currentConfig.inner_model) currentConfig.inner_model = {model_params: {}};
+      if (!currentConfig.inner_model.model_params) currentConfig.inner_model.model_params = {};
+      if (!currentConfig.inner_model.model_params[innerId]) currentConfig.inner_model.model_params[innerId] = {};
+      for (const [k, pdef] of Object.entries(innerDef.params || {})) {
+        const el = document.getElementById('cfg-' + prefix + 'i-' + k);
+        if (!el) continue;
+        const val = (pdef.type === 'select' || pdef.type === 'ref') ? el.value : parseFloat(el.value);
+        currentConfig.inner_model.model_params[innerId][k] = val;
+      }
+    }
+  }
 }
 
-function renderParam(k, pdef, prefix, curVal) {
+function renderParam(k, pdef, prefix, curVal, section) {
   const label = pdef.label || k;
+  const sec = section || 'd';   // 'd' = decider params, 'i' = inner params
   let inputHtml;
   if (pdef.type === 'select') {
     const opts = pdef.options || {};
-    inputHtml = `<select id="cfg-${prefix}d-${k}" onchange="cfgChanged()" style="background:#222;color:#ddd;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:0.95em;width:160px">
+    inputHtml = `<select id="cfg-${prefix}${sec}-${k}" onchange="cfgChanged()" style="background:#222;color:#ddd;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:0.95em;width:160px">
       ${Object.entries(opts).map(([v,l]) => `<option value="${v}" ${curVal==v?'selected':''}>${l}</option>`).join('')}</select>`;
   } else if (pdef.type === 'ref') {
     const refCat = (schema[pdef.ref_category] || {}).models || {};
-    inputHtml = `<select id="cfg-${prefix}d-${k}" onchange="cfgChanged()" style="background:#222;color:#ddd;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:0.95em;width:180px">
+    inputHtml = `<select id="cfg-${prefix}${sec}-${k}" onchange="cfgChanged()" style="background:#222;color:#ddd;border:1px solid #555;padding:4px 8px;border-radius:4px;font-size:0.95em;width:180px">
       ${Object.entries(refCat).map(([mid,m]) => `<option value="${mid}" ${curVal==mid?'selected':''}>${m.name}</option>`).join('')}</select>`;
   } else {
     const step = pdef.step || 1;
-    inputHtml = `<input type="number" value="${curVal}" step="${step}" id="cfg-${prefix}d-${k}" onchange="cfgChanged()" style="width:72px;background:#222;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px 8px;font-size:0.95em">`;
+    inputHtml = `<input type="number" value="${curVal}" step="${step}" id="cfg-${prefix}${sec}-${k}" onchange="cfgChanged()" style="width:72px;background:#222;color:#ddd;border:1px solid #555;border-radius:4px;padding:5px 8px;font-size:0.95em">`;
   }
   return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:5px">
     <span style="width:90px;text-align:right;font-size:0.95em;color:#aaa">${label}</span>
@@ -1261,17 +1313,30 @@ function buildConfigTab(tabId, playerId) {
     dHtml += renderParam(k, pdef, prefix, curVal);
   }
 
-  // Also show inner model params if this decider has a "ref" to inner_model
+  // Also show inner model params if this decider has a "ref" to inner_model.
+  // Inner model params live in the GLOBAL config section
+  // (config.inner_model.model_params) — the backend registry reads them from
+  // there (app.py api_config → registry.create_agent_for_player). Reading
+  // them from curParams (the decider's own params) used to show defaults
+  // forever and, worse, saveToConfig never even collected these inputs, so
+  // the whole section was cosmetic. Only rendered on the global tab since
+  // the backend scope is global anyway.
   const innerRef = Object.entries(deciderDef.params || {}).find(([k,p]) => p.ref_category === 'inner_model');
   let iHtml = '';
-  if (innerRef) {
-    const innerId = curParams[innerRef[0]] || innerRef[1].default || 'informed';
+  if (innerRef && isGlobal) {
+    const innerId = ((currentConfig.decider || {}).model_params || {})[deciderId]?.[innerRef[0]]
+      || innerRef[1].default || 'informed';
     const innerCat = (schema.inner_model || {}).models || {};
     const innerDef = innerCat[innerId] || {};
-    iHtml = '<div style="color:#888;font-size:0.9em;max-height:260px;overflow-y:auto;margin-top:6px;border-top:1px solid #333;padding-top:6px">内层模型参数 (' + (innerDef.name||innerId) + '):';
+    const innerParams = ((currentConfig.inner_model || {}).model_params || {})[innerId] || {};
+    iHtml = '<div style="color:#888;font-size:0.9em;max-height:260px;overflow-y:auto;margin-top:6px;border-top:1px solid #333;padding-top:6px">内层模型参数 (' + (innerDef.name||innerId) + ')<span style="color:#666"> — 全局生效</span>:';
     for (const [k, pdef] of Object.entries(innerDef.params || {})) {
-      const curVal = curParams[k] ?? pdef.default;
-      iHtml += renderParam(k, pdef, prefix, curVal);
+      const curVal = innerParams[k] ?? pdef.default;
+      // Distinct id namespace "cfg-gi-" — decider params use "cfg-gd-"; the
+      // old shared "cfg-gd-" ids collided when both sections had the same
+      // key (e.g. mc + exact both expose time_limit_ms) and getElementById
+      // silently returned the first match.
+      iHtml += renderParam(k, pdef, 'g', curVal, 'i');
     }
     iHtml += '</div>';
   }
@@ -1296,7 +1361,16 @@ function buildConfigTab(tabId, playerId) {
 
 function onPlayerEnable(playerId) {
   const cb = document.getElementById('cfg-penabled-' + playerId);
-  if (!cb.checked) currentConfig.players[playerId] = {decider: null, params: {}};
+  if (cb.checked) {
+    // Checking must PERSIST the override: enabled state is derived from
+    // players[p].decider being non-null, so without writing it here the
+    // rebuild recomputed enabled=false and the checkbox popped right back.
+    if (!currentConfig.players[playerId]) currentConfig.players[playerId] = {decider: null, params: {}};
+    const sel = document.getElementById('cfg-p' + playerId + 'decider');
+    currentConfig.players[playerId].decider = sel ? sel.value : null;
+  } else {
+    currentConfig.players[playerId] = {decider: null, params: {}};
+  }
   buildConfigTab('p' + playerId, playerId);
 }
 

@@ -280,3 +280,35 @@ def test_playerview_carries_tribute_records():
     tribute = [{"round": 1, "exchanges": [{"payer": 1, "receiver": 0}]}]
     view = PlayerView(state, 1, ActionLog(), tribute_records=tribute)
     assert view.tribute_public_records() == tribute
+
+
+# ---------------------------------------------------------------------------
+# Auto-play continuity across rounds (round-3 audit H4)
+# ---------------------------------------------------------------------------
+
+def test_auto_play_survives_next_round_no_start_click():
+    """With auto-play armed, starting the next round must NOT drop back to
+    the pre-start state: the overlay demanded one extra 开始游戏 click per
+    round. game_started must stay true and the AI loop must re-arm."""
+    g = _fresh_game()
+    g._game_started = True
+    g._auto_play = True
+
+    g._start_round()  # what /api/new_round → start_new_round performs
+
+    assert g._game_started is True
+    assert g._ai_running is True
+    assert g._pending_return is None
+
+
+def test_manual_next_round_still_waits_for_start_click():
+    """Manual mode keeps the old behavior: a fresh deal waits for the
+    开始游戏 button."""
+    g = _fresh_game()
+    g._game_started = True
+    g._auto_play = False
+
+    g._start_round()
+
+    assert g._game_started is False
+    assert g._ai_running is False

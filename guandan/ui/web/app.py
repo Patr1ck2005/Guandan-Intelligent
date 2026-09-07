@@ -522,6 +522,10 @@ def api_evaluate():
     game = _get_game()
     if game.state is None:
         return jsonify({"error": "游戏未开始"})
+    if not game._is_human_turn():
+        # Same guard as /api/suggest: evaluating under the AI's lock can race
+        # the step state machine and read hands mid-play.
+        return jsonify({"error": "不是你的回合"})
 
     data = request.get_json() or {}
     card_ids = data.get("card_ids", [])

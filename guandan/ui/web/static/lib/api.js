@@ -40,7 +40,12 @@ function _apiRequest(path, opts) {
 }
 
 window.gameApi = {
-  getState:      function()     { return _apiRequest('/api/state'); },
+  // getState drives the poll loop: an AI step may legitimately take up to
+  // agent_timeout_ms (75s default), so the 15s default timeout used to
+  // abort mid-step and burn all 5 poll retries on a perfectly healthy
+  // server ("服务器无响应" false alarm). Same for suggest/evaluate, which
+  // run a full MC/LLM analysis server-side.
+  getState:      function()     { return _apiRequest('/api/state', { timeout: 90000 }); },
   playCards:     function(ids)  { return _apiRequest('/api/play', { method: 'POST', body: { card_ids: ids } }); },
   passTurn:      function()     { return _apiRequest('/api/pass', { method: 'POST' }); },
   startGame:     function()     { return _apiRequest('/api/start_game', { method: 'POST' }); },
@@ -53,8 +58,8 @@ window.gameApi = {
   clearAILog:    function()     { return _apiRequest('/api/ai_log/clear', { method: 'POST' }); },
   getConfig:     function()     { return _apiRequest('/api/config'); },
   saveConfig:    function(cfg)  { return _apiRequest('/api/config', { method: 'POST', body: cfg }); },
-  getSuggest:    function()     { return _apiRequest('/api/suggest'); },
-  evaluate:      function(ids)  { return _apiRequest('/api/evaluate', { method: 'POST', body: { card_ids: ids } }); },
+  getSuggest:    function()     { return _apiRequest('/api/suggest', { timeout: 60000 }); },
+  evaluate:      function(ids)  { return _apiRequest('/api/evaluate', { method: 'POST', body: { card_ids: ids }, timeout: 60000 }); },
   toggleAutoPlay:function(en)   { return _apiRequest('/api/auto_play', { method: 'POST', body: { enabled: en } }); },
 };
 

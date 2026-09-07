@@ -49,7 +49,24 @@ async function waitFor(page, selector, timeoutMs) {
 
   // ---- 1. Game page: 开始游戏 + auto_play → full game ----
   console.log('== game page ==');
-  await page.goto(base + '/game', { waitUntil: 'networkidle' });
+  // Swap to the blind decider for THIS run: the production config (MC-128
+  // with an informed inner model) spends 1-3s per AI step, so a full game
+  // legitimately needs 20-70 minutes through the step-driven poll API and
+  // the 480s budget turned into a coin flip. The state machine this step
+  // acceptance-tests (round transitions, game_over, auto arming) is
+  // decider-independent; the real models are exercised by the eval steps.
+  await page.goto(base + '/game', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(800);   // game page polls /api/state — networkidle never settles
+  const originalConfig = await page.evaluate(async () =>
+    (await (await fetch('/api/config')).json()).config);
+  await page.evaluate(async () => {
+    await fetch('/api/config', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decider: { default_model: 'blind', model_params: {} } }) });
+  });
+  // A config swap alone doesn't re-deal the session game's agents — start
+  // from a fresh game so the blind decider takes effect from move one.
+  await page.evaluate(async () => { await fetch('/api/new_game', { method: 'POST' }); });
   await page.click('text=开始游戏');
   // human seat joins the AI: enable full auto-play via the same endpoint the UI uses
   await page.evaluate(async () => {
@@ -137,7 +154,8 @@ async function waitFor(page, selector, timeoutMs) {
   // Drive a fresh session to round_over via API (own page = own cookie jar),
   // then click the UI button at round-over: it must stay disabled and the
   // POST must be refused with an error message, not re-settle the round.
-  await page.goto(base + '/game', { waitUntil: 'networkidle' });
+  await page.goto(base + '/game', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(800);   // game page polls /api/state — networkidle never settles
   await page.evaluate(async () => {
     await fetch('/api/new_game', { method: 'POST' });
     await fetch('/api/start_game', { method: 'POST' });
@@ -349,6 +367,136 @@ async function waitFor(page, selector, timeoutMs) {
     console.log('  SKIP tuner cancel (job finished too fast to stop)');
   }
   await page.screenshot({ path: path.join(outDir, 'e2e_ui_tuner_cancel.png') });
+
+  // ---- 11. Config panel: inner-model params persist (audit H1) ----
+  console.log('== game config panel: inner params ==');
+  await page.goto(base + '/game', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(800);   // game page polls /api/state — networkidle never settles
+  await page.click('button:has-text("AI设置")');
+  await page.waitForTimeout(800);   // fetchConfig + buildConfigTab
+  const innerSaved = await page.evaluate(async () => {
+    // Switch global decider to MC so the inner-model section renders.
+    const sel = document.getElementById('cfg-gdecider');
+    if (!sel) return { ok: false, why: 'no decider select' };
+    if (sel.value !== 'mc') {
+      sel.value = 'mc';
+      sel.dispatchEvent(new Event('change'));   // rebuilds with inner section
+      await new Promise(r => setTimeout(r, 100));
+    }
+    // Inner (informed) params live under cfg-gi-<key>; round_weight is one
+    // of them (num_samples is an MC DECIDER param, not an inner param).
+    const innerInput = document.getElementById('cfg-gi-round_weight');
+    if (!innerInput) return { ok: false, why: 'no cfg-gi-round_weight input' };
+    innerInput.value = '9.5';
+    innerInput.dispatchEvent(new Event('change'));   // saveToConfig → currentConfig
+    // 应用 button saves via POST /api/config
+    document.getElementById('btn-config-apply').click();
+    await new Promise(r => setTimeout(r, 1000));
+    const cfg = await (await fetch('/api/config')).json();
+    const v = ((cfg.config.inner_model || {}).model_params || {}).informed || {};
+    return { ok: v.round_weight === 9.5, got: v.round_weight, why: 'roundtrip' };
+  });
+  check(innerSaved.ok === true,
+    `inner-model param survives save/reload (got: ${innerSaved.got ?? innerSaved.why ?? 'n/a'})`);
+  // restore default so later runs aren't skewed
+  await page.evaluate(async () => {
+    const cfg = await (await fetch('/api/config')).json();
+    if (cfg.config.inner_model?.model_params?.informed) {
+      cfg.config.inner_model.model_params.informed.round_weight = 5.0;
+      await fetch('/api/config', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inner_model: cfg.config.inner_model }) });
+    }
+  });
+  await page.screenshot({ path: path.join(outDir, 'e2e_ui_inner_params.png') });
+
+  // ---- 12. Player-enable checkbox persists (audit H2) ----
+  // Fresh load: the panel toggle is a two-state switch, so reusing the page
+  // from step 11 closed it and every click below landed on hidden DOM.
+  console.log('== game config panel: player enable ==');
+  await page.goto(base + '/game', { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(800);   // game page polls /api/state — networkidle never settles
+  await page.click('button:has-text("AI设置")');
+  await page.waitForTimeout(800);
+  const enableOk = await page.evaluate(async () => {
+    const tab = document.getElementById('cfg-tab-p1');
+    if (!tab) return { ok: false, why: 'no p1 tab' };
+    tab.click();
+    await new Promise(r => setTimeout(r, 100));
+    const cb = document.getElementById('cfg-penabled-1');
+    if (!cb) return { ok: false, why: 'no enable checkbox' };
+    cb.click();   // check it — writes players[1].decider (H2 fix)
+    await new Promise(r => setTimeout(r, 150));
+    const stillChecked = cb.checked;
+    // 应用 persists the override
+    document.getElementById('btn-config-apply').click();
+    await new Promise(r => setTimeout(r, 1000));
+    const cfg = await (await fetch('/api/config')).json();
+    const p1 = cfg.config.players['1'] || cfg.config.players[1] || {};
+    return { ok: stillChecked && p1.decider != null, decider: p1.decider, stillChecked };
+  });
+  check(enableOk.ok === true,
+    `启用独立配置 checkbox stays checked and persists (decider: ${enableOk.decider ?? enableOk.why ?? 'n/a'})`);
+  // cleanup: clear the per-player override
+  await page.evaluate(async () => {
+    const players = { 0: {decider: null, params: {}}, 1: {decider: null, params: {}},
+                      2: {decider: null, params: {}}, 3: {decider: null, params: {}} };
+    await fetch('/api/config', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ players }) });
+  });
+  await page.screenshot({ path: path.join(outDir, 'e2e_ui_player_enable.png') });
+
+  // ---- 13. Auto-play continuity: 下一局 needs no extra 开始游戏 (audit H4) ----
+  console.log('== auto-play continuity ==');
+  // Steps 11/12 may have left the decider on MC — swap to blind again so
+  // the round plays out in milliseconds, not minutes.
+  await page.evaluate(async () => {
+    await fetch('/api/config', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decider: { default_model: 'blind', model_params: {} } }) });
+  });
+  await page.evaluate(async () => {
+    await fetch('/api/new_game', { method: 'POST' });
+    await fetch('/api/start_game', { method: 'POST' });
+    await fetch('/api/auto_play', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true }) });
+  });
+  const continuityOk = await (async () => {
+    const t0c = Date.now();
+    while (Date.now() - t0c < 240000) {
+      const st = await page.evaluate(async () => {
+        const r = await fetch('/api/state');
+        return await r.json();
+      }).catch(() => null);
+      if (st && st.round_over) {
+        // One click of 下一局 (what the round-over panel does)...
+        await page.evaluate(async () => {
+          await fetch('/api/new_round', { method: 'POST' });
+        });
+        const st2 = await page.evaluate(async () => (await (await fetch('/api/state')).json()));
+        // ...must land in a running auto round: started, AI armed, no overlay.
+        return { ok: st2.game_started === true && st2.auto_play === true,
+                 started: st2.game_started, auto: st2.auto_play };
+      }
+      if (st && st.game_over) return { ok: true, note: 'game_over before round 2' };
+      await page.waitForTimeout(80);
+    }
+    return { ok: false, why: 'no round_over in time' };
+  })();
+  check(continuityOk.ok === true,
+    `auto-play round continues without 开始游戏 (started: ${continuityOk.started ?? continuityOk.note ?? '?'}, auto: ${continuityOk.auto ?? '?'})`);
+
+  // Restore the production config this run swapped out for the blind decider.
+  await page.evaluate(async (cfg) => {
+    await fetch('/api/config', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        decider: cfg.decider, inner_model: cfg.inner_model,
+        enumerator: cfg.enumerator, players: cfg.players,
+      }) });
+  }, originalConfig);
 
   console.log('--- errors:', errors.length);
   errors.slice(0, 15).forEach(e => console.log(' ', e));
