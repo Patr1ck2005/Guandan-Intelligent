@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/Patr1ck2005/Guandan-Intelligent",
+  "source_revision": "88bdabc59f1b3d16739e7270cbaa9c94ee139da4",
+  "capture_date": "2026-10-17",
+  "mode": "actual browser screenshot",
+  "image": "gameplay-public-baseline.png",
+  "sha256": "eb032da47c4dcab2ded3a79a257cb383336e899bfeb9201a8374972560fbda5c",
+  "source_archive_sha256": "248b0f309900e7db767dd99d7f312857c3cc4014bbc4db6c98115a88697ebb76",
+  "browser": "148.0.7778.96",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "operations": [
+    "Open /game",
+    "Click the original Start Game button",
+    "Capture the original rendered page after dealing with blind heuristic agents"
+  ],
+  "page_errors": [],
+  "limits": "One source-backed UI capture, not full gameplay or scientific validation.",
+  "agent_mode": "blind heuristic for all seats; no paid/external model"
+}
